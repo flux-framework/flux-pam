@@ -1,0 +1,29 @@
+queue_rules:
+  - name: default
+    conditions:
+      - base=main
+      - status-success="el8"
+      - status-success="focal"
+      - status-success="fedora35"
+      - label="merge-when-passing"
+      - label!="work-in-progress"
+      - "approved-reviews-by=@flux-framework/core"
+      - "#approved-reviews-by>0"
+      - "#changes-requested-reviews-by=0"
+      - -title~=^\[*[Ww][Ii][Pp]
+
+pull_request_rules:
+  - name: default
+    conditions:
+      - base=main
+      - label="merge-when-passing"
+      - label!="work-in-progress"
+      - "approved-reviews-by=@flux-framework/core"
+      - "#approved-reviews-by>0"
+      - "#changes-requested-reviews-by=0"
+      - -title~=^\[*[Ww][Ii][Pp]
+    actions:
+      queue:
+        name: default
+        method: merge
+        update_method: rebase
