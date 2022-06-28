@@ -43,6 +43,18 @@ jobs:
        ref: ${{ github.event.pull_request.head.sha }}
        fetch-depth: 0
 
+    - name: fetch annotated tag
+      if: matrix.create_release && startswith(github.ref, 'refs/tags')
+      run: |
+        # Ensure git-describe works on a tag.
+        #  (checkout@v2 action may have left current tag as
+        #   lightweight instead of annotated. See
+        #   https://github.com/actions/checkout/issues/290)
+        #
+        echo github.ref == ${{ github.ref }} ;
+        git fetch -f origin ${{ github.ref }}:${{ github.ref }} ;
+        echo git describe now reports $(git describe --always)
+
     - name: get tag name
       id: tag
       run: echo ::set-output name=TAG::${GITHUB_REF/refs\/tags\//}
