@@ -31,8 +31,8 @@ jobs:
           image: "el8"
           env:
             chain_lint: t
-        - name: "fedora35"
-          image: "fedora35"
+        - name: "fedora38"
+          image: "fedora38"
           env: {}
       fail-fast: false
     name: ${{ matrix.name }}
