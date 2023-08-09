@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         ref: ${{ github.event.pull_request.head.sha }}
         fetch-depth: 0
@@ -31,14 +31,14 @@ jobs:
           image: "el8"
           env:
             chain_lint: t
-        - name: "fedora35"
-          image: "fedora35"
+        - name: "fedora38"
+          image: "fedora38"
           env: {}
       fail-fast: false
     name: ${{ matrix.name }}
     steps:
     - name: checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       with:
        ref: ${{ github.event.pull_request.head.sha }}
        fetch-depth: 0
@@ -47,7 +47,7 @@ jobs:
       if: matrix.create_release && startswith(github.ref, 'refs/tags')
       run: |
         # Ensure git-describe works on a tag.
-        #  (checkout@v2 action may have left current tag as
+        #  (checkout@v3 action may have left current tag as
         #   lightweight instead of annotated. See
         #   https://github.com/actions/checkout/issues/290)
         #
@@ -57,7 +57,7 @@ jobs:
 
     - name: get tag name
       id: tag
-      run: echo ::set-output name=TAG::${GITHUB_REF/refs\/tags\//}
+      run: echo "TAG=${GITHUB_REF/refs\/tags\//}" >$GITHUB_OUTPUT
 
     - name: docker-run-checks
       env: ${{ matrix.env }}
@@ -73,12 +73,16 @@ jobs:
 
     - name: create release
       id: create_release
-      if: success() && matrix.create_release && startswith(github.ref, 'refs/tags')
+      if: |
+        success()
+         && matrix.create_release
+         && startswith(github.ref, 'refs/tags')
+         && github.repository == 'flux-framework/flux-pam'
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ steps.tag.output.name }}
-        release_name: flux-pam ${{ steps.tag.output.name }}
+        tag_name: ${{ steps.tag.output.TAG }}
+        name: flux-pam ${{ steps.tag.output.TAG }}
         prerelease: true
-        body: |
-          View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ matrix.tag }}/NEWS.md) for flux-accounting ${{ matrix.tag }}
         files: flux-pam*.tar.gz
+        body: |
+          View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ matrix.tag }}/NEWS.md) for flux-pam ${{ steps.tag.output.TAG }}
