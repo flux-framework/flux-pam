@@ -41,7 +41,7 @@ test_expect_success 'pam_flux: module denies access with no jobs running' '
 	test_must_fail pamtest -u ${USER} 
 '
 test_expect_success 'pam_flux: module allows access with a job running' '
-	jobid=$(flux mini submit --wait-event=alloc sleep 300) &&
+	jobid=$(flux submit --wait-event=alloc sleep 300) &&
 	pamtest -u ${USER}
 '
 test_expect_success 'pam_flux: module does not let any old user in' '
@@ -69,7 +69,7 @@ test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	EOF
 	flux config reload &&
 	flux jobtap load perilog.so &&
-	jobid=$(flux mini submit --wait-event=epilog-start hostname) &&
+	jobid=$(flux submit --wait-event=epilog-start hostname) &&
 	test_must_fail pamtest -u ${USER} &&
 	flux jobs -o "{id.f58}: {state}" &&
 	flux event pub pam-test-done &&

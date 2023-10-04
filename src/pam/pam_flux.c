@@ -76,12 +76,19 @@ static int flux_check_user (uid_t uid)
         goto out;
     }
 
-    f = flux_job_list (h,
+    f = flux_rpc_pack (h,
+                       "job-list.list",
                        0,
-                       "[\"ranks\", \"state\"]",
-                       uid,
-                       FLUX_JOB_STATE_RUNNING);
+                       0,
+                       "{s:i s:[ss] s:{s:[{s:[i]} {s:[i]}]}}",
+                       "max_entries", 0,
+                       "attrs", "ranks", "state",
+                       "constraint",
+                        "and",
+                         "userid", uid,
+                         "states", FLUX_JOB_STATE_RUNNING);
     if (!f || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
+        flux_future_destroy (f);
         log_msg (LOG_ERR, "flux_job_list: %m");
         goto out;
     }
