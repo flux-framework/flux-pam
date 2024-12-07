@@ -95,7 +95,6 @@ static int flux_check_user (uid_t uid)
                          "ranks", rankstr,
                          "states", FLUX_JOB_STATE_RUN);
     if (!f || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
-        flux_future_destroy (f);
         log_msg (LOG_ERR, "flux_job_list: %m");
         goto out;
     }
