@@ -32,7 +32,6 @@
 #include <jansson.h>
 
 #include <flux/core.h>
-#include <flux/idset.h>
 
 #define PAM_SM_ACCOUNT
 #include <security/pam_modules.h>
@@ -59,12 +58,10 @@ static void log_msg (int level, const char *format, ...)
 static int flux_check_user (uid_t uid)
 {
     int authorized = 0;
-    size_t index;
-    json_t *value;
     json_t *jobs = NULL;
     flux_t *h = NULL;
     unsigned int rank = -1;
-    flux_job_state_t state = FLUX_JOB_STATE_NEW;
+    char rankstr[16];
     flux_future_t *f = NULL;
 
     if (!(h = flux_open (NULL, 0))) {
@@ -75,45 +72,39 @@ static int flux_check_user (uid_t uid)
         log_msg (LOG_ERR, "Failed to get current broker rank: %m");
         goto out;
     }
+    if (snprintf (rankstr,
+                  sizeof (rankstr),
+                  "%u",
+                  rank) >= sizeof (rankstr)) {
+        log_msg (LOG_ERR, "Failed to encode broker rank as string: %m");
+        goto out;
+    }
 
+    /* Query jobs in RUN state on current rank using RFC 43 constraint object
+     */
     f = flux_rpc_pack (h,
                        "job-list.list",
                        0,
                        0,
-                       "{s:i s:[ss] s:{s:[{s:[i]} {s:[i]}]}}",
+                       "{s:i s:[ss] s:{s:[{s:[i]} {s:[s]} {s:[i]}]}}",
                        "max_entries", 0,
                        "attrs", "ranks", "state",
                        "constraint",
                         "and",
                          "userid", uid,
-                         "states", FLUX_JOB_STATE_RUNNING);
+                         "ranks", rankstr,
+                         "states", FLUX_JOB_STATE_RUN);
     if (!f || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
         flux_future_destroy (f);
         log_msg (LOG_ERR, "flux_job_list: %m");
         goto out;
     }
 
-    json_array_foreach (jobs, index, value) {
-        const char *ranks;
-        struct idset *ids;
+    /* If there was at least one job returned, then this user is allowed
+     */
+    if (json_array_size (jobs) > 0)
+        authorized = 1;
 
-        if (json_unpack (value,
-                         "{s:s s:i}",
-                         "ranks", &ranks,
-                         "state", &state) < 0
-            || !(ids = idset_decode (ranks))) {
-            log_msg (LOG_ERR, "Failed to unpack job response");
-            goto out;
-        }
-        /*  Job must have an R which includes this rank _and_ the job
-         *   must be in FLUX_JOB_STATE_RUN (not CLEANUP)
-         */
-        if (idset_test (ids, rank) && state == FLUX_JOB_STATE_RUN)
-            authorized = 1;
-        idset_destroy (ids);
-        if (authorized)
-            goto out;
-    }
 out:
     flux_future_destroy (f);
     flux_close (h);
