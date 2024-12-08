@@ -62,6 +62,7 @@ test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	command = [ "flux", "event", "sub", "-c1",  "pam-test-done" ]
 	EOF
 	flux config reload &&
+	test_when_finished "rm config/epilog.toml && flux config reload" &&
 	flux jobtap load perilog.so &&
 	jobid=$(flux submit --wait-event=epilog-start hostname) &&
 	test_must_fail pamtest -u ${USER} &&
