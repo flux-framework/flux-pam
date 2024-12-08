@@ -35,7 +35,6 @@
 
 #define PAM_SM_ACCOUNT
 #include <security/pam_modules.h>
-#include <security/_pam_macros.h>
 
 /*
  *  Write message described by the 'format' string to syslog.
@@ -157,8 +156,13 @@ static void send_denial_msg (pam_handle_t *pamh,
         log_msg (LOG_ERR,
                  "unable to converse with app: %s",
                  pam_strerror (pamh, retval));
-    if (prsp != NULL)
-        _pam_drop_reply (prsp, 1);
+    if (prsp != NULL) {
+        /* N.B. _pam_drop_reply() deprecated in recent versions
+         * of Linux-PAM. Free reply without use of macros:
+         */
+        free (prsp[0].resp);
+        free (prsp);
+    }
 
     return;
 }
