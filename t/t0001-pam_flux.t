@@ -58,14 +58,8 @@ test_expect_success 'pam_flux: module denies access on flux_open() failure' '
 '
 test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	cat <<-EOF >config/epilog.toml &&
-	#  Note: prolog only needs to be configured due to bug in
-	#   flux-core <= v0.40.0
-	[job-manager.prolog]
-	command = [ "/bin/true" ]
-
 	[job-manager.epilog]
 	command = [ "flux", "event", "sub", "-c1",  "pam-test-done" ]
-
 	EOF
 	flux config reload &&
 	flux jobtap load perilog.so &&
