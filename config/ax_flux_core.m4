@@ -49,7 +49,7 @@ AC_DEFUN([AX_FLUX_CORE], [
   PKG_CONFIG_PATH=${prefix}/lib/pkgconfig:${PKG_CONFIG_PATH}
   export PKG_CONFIG_PATH
 
-  PKG_CHECK_MODULES([FLUX_CORE], [flux-core > 0.29.0],
+  PKG_CHECK_MODULES([FLUX_CORE], [flux-core > 0.64.0],
     [
       FLUX_PREFIX=`pkg-config --variable=prefix flux-core`
       LIBFLUX_VERSION=`pkg-config --modversion flux-core`
