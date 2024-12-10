@@ -8,11 +8,10 @@ AC_CONFIG_AUX_DIR([config])
 AC_CONFIG_MACRO_DIR([config])
 AC_CONFIG_SRCDIR([NEWS.md])
 AC_PREFIX_DEFAULT([/usr])
-AC_CANONICAL_SYSTEM
+AC_CANONICAL_TARGET
 
 AM_INIT_AUTOMAKE([subdir-objects tar-pax foreign])
 AM_SILENT_RULES([yes])
-AM_CONFIG_HEADER([config/config.h])
 AM_MAINTAINER_MODE([enable])
 
 AC_DEFINE([_GNU_SOURCE], 1,
@@ -34,7 +33,7 @@ PKG_PROG_PKG_CONFIG
 
 # Checks for programs
 ##
-AC_PROG_CC_C99
+AC_PROG_CC
 AM_PROG_CC_C_O
 AX_COMPILER_VENDOR
 AX_COMPILER_VERSION
@@ -48,9 +47,42 @@ AC_SUBST([WARNING_CFLAGS])
 
 LT_INIT
 
-AC_HEADER_STDC
-
 PKG_CHECK_MODULES([JANSSON], [jansson >= 2.10], [], [])
+AS_IF([test "x$enable_docs" != "xno"], [
+            AM_CHECK_PYMOD(sphinx,
+                           [Version(sphinx.__version__) >= Version ('1.6.7')],
+                           [sphinx=true],
+                           [sphinx=false; AC_MSG_WARN([could not find sphinx to generate docs, version 1.6.7+ required])]
+                           )
+            AM_CHECK_PYMOD(docutils,
+                           [Version(docutils.__version__) >= Version ('0.11.0')],
+                           [docutils=true],
+                           [docutils=false; AC_MSG_WARN([could not find docutils to generate docs, version 0.11.0+ required])]
+                           )
+])
+#  If --enable-docs=yes, but no doc generator found,
+#   then error immediately:
+#
+#  If --enable-docs=yes, but no doc generator found,
+#   then error immediately:
+#
+AS_IF([test "x$enable_docs" = "xyes" -a "x$sphinx" = "xfalse"],[
+  AC_MSG_ERROR([--enable-docs used but no document generator found!])
+])
+AS_IF([test "x$enable_docs" = "xyes" -a "x$docutils" = "xfalse"],[
+  AC_MSG_ERROR([--enable-docs used but docutils not found!])
+])
+AM_CONDITIONAL([ENABLE_DOCS], [test "x$sphinx" = "xtrue" -a "x$docutils" = "xtrue"])
+AC_CHECK_PROG(ASPELL,[aspell],[aspell])
+
+AS_IF([test "x$enable_docs" != "xno"], [
+  if test "x$sphinx" = "xfalse"; then
+    AC_MSG_WARN([Python Sphinx not found. Manual pages will not be generated.])
+  elif test "x$docutils" = "xfalse"; then
+    AC_MSG_WARN([Python Docutils not found. Manual pages will not be generated.])
+  fi
+])
+
 AX_FLUX_CORE
 
 AC_CHECK_HEADERS_ONCE([security/pam_appl.h])
@@ -76,6 +108,7 @@ AC_SUBST(SECUREDIR)
 AC_CONFIG_FILES( \
   Makefile \
   src/pam/Makefile \
+  doc/Makefile \
   t/Makefile \
 )
 
