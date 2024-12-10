@@ -1,4 +1,4 @@
-FROM fluxrm/flux-core:fedora38
+FROM fluxrm/flux-core:fedora40
 
 ARG USER=fluxuser
 ARG UID=1000
