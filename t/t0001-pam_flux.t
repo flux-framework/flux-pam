@@ -58,7 +58,7 @@ test_expect_success 'pam_flux: module does not let any old user in' '
 	test_must_fail pamtest -u nobody
 '
 test_expect_success 'pam_flux: module denies access after job terminates' '
-	flux job cancel $jobid &&
+	flux cancel $jobid &&
 	flux job wait-event -vt 15 $jobid free &&
 	test_must_fail pamtest -u ${USER}
 '
