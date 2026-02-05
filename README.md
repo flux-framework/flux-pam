@@ -31,3 +31,9 @@ e.g.:
 ```
 account  sufficient pam_flux.so
 ```
+
+#### Release
+
+SPDX-License-Identifier: LGPL-3.0
+
+LLNL-CODE-764420
