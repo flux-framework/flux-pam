@@ -85,6 +85,46 @@ AS_IF([test "x$enable_docs" != "xno"], [
 
 AX_FLUX_CORE
 
+##
+# Systemd support
+##
+AC_ARG_ENABLE([systemd],
+  AS_HELP_STRING([--enable-systemd],
+    [Enable systemd integration @<:@default=auto@:>@]))
+
+AS_IF([test "x$enable_systemd" != "xno"], [
+  PKG_CHECK_MODULES([LIBSYSTEMD], [libsystemd >= 239],
+                    [have_libsystemd=yes], [have_libsystemd=no])
+  AC_CHECK_HEADER([systemd/sd-bus.h], [have_sd_bus_h=yes], [have_sd_bus_h=no])
+
+  AS_IF([test "x$have_libsystemd" = "xyes" -a "x$have_sd_bus_h" = "xyes"], [
+    AC_DEFINE([HAVE_LIBSYSTEMD], [1], [Define if you have libsystemd])
+
+    # Find systemd utilities
+    AC_ARG_VAR([SYSTEMCTL], [Path to systemctl])
+    AC_PATH_PROG([SYSTEMCTL], [systemctl], [no])
+    AS_IF([test "x$SYSTEMCTL" = "xno"], [
+      AC_MSG_ERROR([systemctl not found in PATH])
+    ])
+
+    AC_ARG_VAR([LOGINCTL], [Path to loginctl])
+    AC_PATH_PROG([LOGINCTL], [loginctl], [no])
+    AS_IF([test "x$LOGINCTL" = "xno"], [
+      AC_MSG_ERROR([loginctl not found in PATH])
+    ])
+  ], [
+    AS_IF([test "x$enable_systemd" = "xyes"], [
+      AC_MSG_ERROR([--enable-systemd was given but libsystemd not found])
+    ])
+    have_libsystemd=no
+  ])
+], [
+  have_libsystemd=no
+])
+
+AM_CONDITIONAL([HAVE_LIBSYSTEMD], [test "x$have_libsystemd" = "xyes"])
+
+
 AC_CHECK_HEADERS_ONCE([security/pam_appl.h])
 AC_CHECK_HEADER([security/pam_modules.h], [], [], \
 		[#ifdef HAVE_SECURITY_PAM_APPL_H
