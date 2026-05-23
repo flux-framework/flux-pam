@@ -10,5 +10,6 @@ EXTRA_DIST = \
 
 SUBDIRS = \
 	src/pam \
+	etc \
 	doc \
 	t

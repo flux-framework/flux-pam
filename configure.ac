@@ -148,6 +148,7 @@ AC_SUBST(SECUREDIR)
 AC_CONFIG_FILES( \
   Makefile \
   src/pam/Makefile \
+  etc/Makefile \
   doc/Makefile \
   t/Makefile \
 )
