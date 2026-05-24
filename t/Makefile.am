@@ -1,7 +1,7 @@
 AM_CFLAGS = \
         $(WARNING_CFLAGS)
 
-TEST_EXTESIONS = .t
+TEST_EXTENSIONS = .t
 T_LOG_DRIVER = env AM_TAP_AWK='$(AWK)' $(SHELL) \
         $(top_srcdir)/config/tap-driver.sh
 
