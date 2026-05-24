@@ -3,6 +3,80 @@
 #  project-local sharness code for Flux
 #
 
+# Default values for test_wait_until
+TEST_WAIT_UNTIL_DEFAULT_ITERS=30
+TEST_WAIT_UNTIL_DEFAULT_SLEEP=0.5
+TEST_WAIT_UNTIL_DEFAULT_VERBOSE=0
+
+#
+#  Wait until a command succeeds or timeout
+#
+#  Usage: test_wait_until [-i iterations] [-s sleep_time] [-v] command
+#
+#  Options:
+#    -i, --iterations N    Max number of iterations (default: 30)
+#    -s, --sleep N         Sleep time between iterations (default: 0.5)
+#    -v, --verbose         Verbose output
+#
+test_wait_until() {
+    local iterations=$TEST_WAIT_UNTIL_DEFAULT_ITERS
+    local sleep_time=$TEST_WAIT_UNTIL_DEFAULT_SLEEP
+    local verbose=$TEST_WAIT_UNTIL_DEFAULT_VERBOSE
+
+    # Process options
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -i|--iterations)
+                iterations=$2
+                shift 2
+                ;;
+            -s|--sleep)
+                sleep_time=$2
+                shift 2
+                ;;
+            -v|--verbose)
+                verbose=1
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    # Ensure we have a command to run
+    if [ $# -eq 0 ]; then
+        echo "Error: test_wait_until requires a command to execute" >&2
+        return 1
+    fi
+
+    # The remaining arguments form the command to execute
+    local cmd="$1"
+    [ $verbose -eq 1 ] && echo "test_wait_until: running $cmd"
+
+    local i=0
+    while [ $i -lt $iterations ]
+    do
+        if [ $verbose -eq 1 ]; then
+            if eval "$cmd"; then
+                echo "test_wait_until: condition met after $i iterations"
+                return 0
+            fi
+        else
+            if eval "$cmd" >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+
+        [ $verbose -eq 1 ] && echo "test_wait_until: waiting... ($i/$iterations)"
+        sleep $sleep_time
+        i=$((i + 1))
+    done
+
+    [ $verbose -eq 1 ] && echo "test_wait_until: timeout after $iterations iterations"
+    return 1
+}
+
 #
 #  Echo on stdout a reasonable size for a large test session,
 #   controllable test-wide via env vars FLUX_TEST_SIZE_MIN and
