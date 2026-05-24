@@ -47,6 +47,11 @@ AC_SUBST([WARNING_CFLAGS])
 
 LT_INIT
 
+##
+# Python
+##
+AM_PATH_PYTHON([3.6])
+
 PKG_CHECK_MODULES([JANSSON], [jansson >= 2.10], [], [])
 AS_IF([test "x$enable_docs" != "xno"], [
             AM_CHECK_PYMOD(sphinx,
@@ -84,6 +89,15 @@ AS_IF([test "x$enable_docs" != "xno"], [
 ])
 
 AX_FLUX_CORE
+
+##
+# Define flux subdirectories relative to standard directories
+# This ensures DESTDIR and --prefix work correctly for distcheck
+##
+fluxpydir='${pyexecdir}/flux'
+AC_SUBST([fluxpydir])
+fluxlibexecdir='${libexecdir}/flux'
+AC_SUBST([fluxlibexecdir])
 
 ##
 # Systemd support
@@ -148,6 +162,7 @@ AC_SUBST(SECUREDIR)
 AC_CONFIG_FILES( \
   Makefile \
   src/pam/Makefile \
+  src/bindings/python/Makefile \
   etc/Makefile \
   doc/Makefile \
   t/Makefile \
