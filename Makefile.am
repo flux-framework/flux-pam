@@ -6,7 +6,8 @@ EXTRA_DIST = \
 	NOTICE.LLNS \
 	CONTRIBUTING.md \
 	MAINTAINERS.md \
-	config/tap-driver.sh
+	config/tap-driver.sh \
+	config/tap-driver.py
 
 SUBDIRS = \
 	src/pam \
