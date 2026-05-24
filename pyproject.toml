@@ -1,0 +1,20 @@
+[tool.black]
+target-version = ['py36']
+line-length = 79
+
+[tool.isort]
+profile = "black"
+line_length = 79
+
+[tool.flake8]
+max-line-length = 79
+extend-ignore = ["E203", "W503"]
+
+[tool.mypy]
+python_version = "3.6"
+mypy_path = ["src/bindings/python", "t/python/tap", "t/python"]
+allow_redefinition = true
+cache_dir = "/dev/null"
+namespace_packages = true
+ignore_errors = true
+ignore_missing_imports = true

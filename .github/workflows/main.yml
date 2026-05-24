@@ -13,6 +13,20 @@ jobs:
     - run: git fetch origin main
     - uses: flux-framework/pr-validator@master
 
+  python-lint:
+    name: python linting
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/setup-python@v6.2.0
+    - uses: actions/checkout@v6.0.2
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
+    - name: install linting and formatting deps
+      run: pip install -r scripts/requirements-dev.txt
+    - name: format and linting checks
+      run: pre-commit run --all-files
+
   ci-checks:
     runs-on: ubuntu-latest
     env:
