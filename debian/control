@@ -1,0 +1,22 @@
+Source: flux-pam
+Section: devel
+Priority: optional
+Maintainer: Mark A. Grondona <mark.grondona@gmail.com>
+Standards-Version: 4.1.2
+Build-Depends:
+  debhelper (>= 10),
+  libpam0g-dev,
+  libsystemd-dev,
+  flux-core,
+  python3
+
+Homepage: https://github.com/flux-framework/flux-pam
+Package: flux-pam
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, flux-core
+Description: PAM module for Flux
+ flux-pam provides a PAM module for integrating systemd user services
+ with Flux jobs, including prolog/housekeeping scripts for managing
+ user slice resource constraints.
+ Note: This package is meant for testing and may not meet Debian packaging
+ standards.

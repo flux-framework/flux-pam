@@ -7,7 +7,9 @@ EXTRA_DIST = \
 	CONTRIBUTING.md \
 	MAINTAINERS.md \
 	config/tap-driver.sh \
-	config/tap-driver.py
+	config/tap-driver.py \
+	debian \
+	scripts
 
 SUBDIRS = \
 	src/pam \
@@ -16,3 +18,9 @@ SUBDIRS = \
 	etc \
 	doc \
 	t
+
+deb: debian scripts/debbuild.sh
+	@$(top_srcdir)/scripts/debbuild.sh $(abs_top_srcdir)
+
+clean-local:
+	@rm -rf debbuild
