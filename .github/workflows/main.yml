@@ -106,3 +106,27 @@ jobs:
         files: flux-pam*.tar.gz
         body: |
           View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ matrix.tag }}/NEWS.md) for flux-pam ${{ steps.tag.output.TAG }}
+
+  system-tests:
+    runs-on: ubuntu-latest
+    env:
+      FLUX_TEST_TIMEOUT: 300
+      FLUX_PAM_TEST_USER: nobody
+    timeout-minutes: 30
+    name: "el8 system tests"
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+       ref: ${{ github.event.pull_request.head.sha }}
+       fetch-depth: 0
+
+    - name: docker-run-systest
+      run: |
+        ./src/test/docker/docker-run-systest.sh \
+          -j $(nproc) \
+          -i el8
+
+    - name: annotate errors
+      if: failure() || cancelled()
+      run: src/test/checks-annotate.sh
