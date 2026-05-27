@@ -116,17 +116,23 @@ out:
     return allowed;
 }
 
+typedef enum {
+    FLUX_AUTH_DENIED    = 0,
+    FLUX_AUTH_JOB_OWNER = 1,  /* uid has a direct active job on this node */
+    FLUX_AUTH_GUEST     = 2,  /* uid is a guest of the instance owner's job */
+} flux_auth_t;
+
 /* Loop over jobs in json array 'jobs'.
- * - If any job owner is uid, permit.
+ * - If any job owner is uid, permit as FLUX_AUTH_JOB_OWNER.
  * - If any job owner is allow_if_user and rank == rank 0 of the job,
- *   permit if the job is an instance (has a uri) and acesss.allow-guest-user
- *   is true.
+ *   permit as FLUX_AUTH_GUEST if the job is an instance and
+ *   access.allow-guest-user is true.
  */
-static int check_jobs_array (pam_handle_t *pamh,
-                             json_t *jobs,
-                             unsigned int rank,
-                             uid_t uid,
-                             uid_t allow_if_user)
+static flux_auth_t check_jobs_array (pam_handle_t *pamh,
+                                     json_t *jobs,
+                                     unsigned int rank,
+                                     uid_t uid,
+                                     uid_t allow_if_user)
 {
     size_t index;
     json_t *entry;
@@ -146,10 +152,10 @@ static int check_jobs_array (pam_handle_t *pamh,
             pam_syslog (pamh,
                         LOG_ERR,
                         "failed to unpack userid, ranks for job");
-            return 0;
+            return FLUX_AUTH_DENIED;
         }
         if (job_uid == uid)
-            return 1;
+            return FLUX_AUTH_JOB_OWNER;
         else if (job_uid == allow_if_user) {
             struct idset *ranks;
             if ((ranks = idset_decode (job_ranks))) {
@@ -161,11 +167,11 @@ static int check_jobs_array (pam_handle_t *pamh,
                     allowed = check_guest_allowed (pamh, uri);
                 idset_destroy (ranks);
                 if (allowed)
-                    return 1;
+                    return FLUX_AUTH_GUEST;
             }
         }
     }
-    return 0;
+    return FLUX_AUTH_DENIED;
 }
 
 /* Fetch an attribute and return its value as uid_t.
@@ -188,9 +194,11 @@ static uid_t attr_get_uid (flux_t *h, const char *name)
 
 /*  get jobs in RUN state on this node for user(s) of interest:
  */
-static int flux_check_user (pam_handle_t *pamh, struct options *opts, uid_t uid)
+static flux_auth_t flux_check_user (pam_handle_t *pamh,
+                                    struct options *opts,
+                                    uid_t uid)
 {
-    int authorized = 0;
+    flux_auth_t authorized = FLUX_AUTH_DENIED;
     json_t *jobs = NULL;
     flux_t *h = NULL;
     unsigned int rank = -1;
@@ -206,7 +214,7 @@ static int flux_check_user (pam_handle_t *pamh, struct options *opts, uid_t uid)
 
     if (!(h = flux_open (NULL, 0))) {
         pam_syslog (pamh, LOG_ERR, "Unable to connect to Flux: %m");
-        return 0;
+        return FLUX_AUTH_DENIED;
     }
     if (flux_get_rank (h, &rank) < 0) {
         pam_syslog (pamh, LOG_ERR, "Failed to get current broker rank: %m");
@@ -379,6 +387,7 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
     const char *user;
     uid_t uid;
     int auth = PAM_PERM_DENIED;
+    flux_auth_t result;
     struct options opts = { .allow_guest_user = false };
 
     if (get_pam_user_uid (pamh, &user, &uid) < 0)
@@ -387,8 +396,19 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
     if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SYSTEM_ERR;
 
-    if (flux_check_user (pamh, &opts, uid))
+    result = flux_check_user (pamh, &opts, uid);
+    if (result != FLUX_AUTH_DENIED) {
+        /*  User has a local job or allow-guest-user is true. In either case
+         *  return PAM_SUCCESS:
+         */
         auth = PAM_SUCCESS;
+        /*  If user is job owner, set pam_flux_authorized sentinel to allow
+         *  other PAM callbacks to determine that pam_flux authorized
+         *  access for this login attempt:
+         */
+        if (result == FLUX_AUTH_JOB_OWNER)
+            pam_set_data (pamh, "pam_flux_authorized", (void *) 0x1, NULL);
+    }
 
     if (auth != PAM_SUCCESS)
         send_denial_msg (pamh, user, uid);
