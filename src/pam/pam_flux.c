@@ -319,6 +319,38 @@ static void send_denial_msg (pam_handle_t *pamh,
     return;
 }
 
+/*  Get UID for PAM_USER. Returns 0 on success, -1 on failure.
+ *  On failure, uid is set to (uid_t)-1.
+ */
+static int get_pam_user_uid (pam_handle_t *pamh, const char **puser, uid_t *uid)
+{
+    const char *user;
+    struct passwd pwd;
+    struct passwd *result;
+    char buf[4096];
+    int retval;
+
+    *uid = (uid_t)-1;
+
+    retval = pam_get_item (pamh, PAM_USER, (const void **) &user);
+    if (retval != PAM_SUCCESS || !user || *user == '\0') {
+        log_msg (LOG_ERR,
+                 "unable to get PAM_USER: %s",
+                 pam_strerror (pamh, retval));
+        return -1;
+    }
+
+    if (getpwnam_r (user, &pwd, buf, sizeof (buf), &result) != 0
+        || !result) {
+        log_msg (LOG_ERR, "user %s does not exist", user);
+        return -1;
+    }
+
+    *puser = user;
+    *uid = pwd.pw_uid;
+    return 0;
+}
+
 static int parse_options (struct options *opts, int argc, const char **argv)
 {
     for (int i = 0; i < argc; i++) {
@@ -339,25 +371,13 @@ static int parse_options (struct options *opts, int argc, const char **argv)
 PAM_EXTERN int
 pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
-    int retval;
     const char *user;
-    struct passwd *pw;
     uid_t uid;
     int auth = PAM_PERM_DENIED;
     struct options opts = { .allow_guest_user = false };
 
-    retval = pam_get_item (pamh, PAM_USER, (const void **) &user);
-    if ((retval != PAM_SUCCESS) || (user == NULL) || (*user == '\0')) {
-        log_msg (LOG_ERR,
-                 "unable to identify user: %s",
-                 pam_strerror(pamh, retval));
+    if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_USER_UNKNOWN;
-    }
-    if (!(pw = getpwnam (user))) {
-        log_msg (LOG_ERR, "user %s does not exist", user);
-        return PAM_USER_UNKNOWN;
-    }
-    uid = pw->pw_uid;
 
     if (parse_options (&opts, argc, argv) < 0)
         return PAM_SYSTEM_ERR;
