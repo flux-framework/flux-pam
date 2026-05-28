@@ -163,9 +163,16 @@ AC_CONFIG_FILES( \
   Makefile \
   src/pam/Makefile \
   src/bindings/python/Makefile \
+  src/scripts/Makefile \
+  src/scripts/flux-pam-prolog \
+  src/scripts/flux-pam-housekeeping \
   etc/Makefile \
   doc/Makefile \
   t/Makefile \
+)
+AC_CONFIG_COMMANDS(
+  [script-permissions],
+  [chmod +x src/scripts/flux-pam-prolog src/scripts/flux-pam-housekeeping]
 )
 
 AC_OUTPUT

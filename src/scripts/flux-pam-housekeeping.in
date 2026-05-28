@@ -1,0 +1,91 @@
+#!@FLUX@ python
+
+###############################################################
+# Copyright 2025 Lawrence Livermore National Security, LLC
+# (c.f. AUTHORS, NOTICE.LLNS, COPYING)
+#
+# This file is part of the Flux resource manager framework.
+# For details, see https://github.com/flux-framework.
+#
+# SPDX-License-Identifier: LGPL-3.0
+###############################################################
+
+"""
+flux-pam-housekeeping: Housekeeping script for flux-pam systemd integration.
+
+Invoked by flux-imp after a job finishes. Manages user@.service lifecycle
+and updates resource constraints on the user's systemd slice.
+
+Environment variables (set by flux-imp):
+    FLUX_JOB_USERID: User ID of job owner
+    FLUX_JOB_ID: Job ID that finished
+"""
+
+import os
+import sys
+
+import flux.job
+import flux.pam
+
+SYSTEMCTL = os.environ.get("FLUX_PAM_TEST_SYSTEMCTL", "@SYSTEMCTL@")
+
+
+def main():
+    """Main entry point for housekeeping script."""
+    # Get job info from environment
+    try:
+        userid = int(os.environ["FLUX_JOB_USERID"])
+        jobid = flux.job.JobID(os.environ["FLUX_JOB_ID"])
+    except KeyError as e:
+        print(f"flux-pam-housekeeping: missing {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(
+            f"flux-pam-housekeeping: invalid job info: {e}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Use PAMHelper to manage systemd resources
+    try:
+        with flux.pam.PAMHelper(userid, jobid, systemctl=SYSTEMCTL) as helper:
+            flux.pam.debug_log(
+                f"housekeeping {jobid}: rank={helper.rank} uid={userid}"
+            )
+
+            # Skip if feature disabled or instance owner
+            if helper.should_skip():
+                flux.pam.debug_log(
+                    f"housekeeping {jobid}: skipping (disabled or owner)"
+                )
+                return 0
+
+            # Count remaining active jobs on this rank (excluding ending job)
+            count = helper.active_local_jobs()
+            flux.pam.debug_log(
+                f"housekeeping {jobid}: {count} jobs remain for uid={userid}"
+            )
+
+            # If no jobs remain (N→0), stop user service
+            if count == 0:
+                flux.pam.debug_log(
+                    f"housekeeping {jobid}: stopping user@{userid}.service"
+                )
+                helper.user_service_stop()
+            else:
+                # Update slice properties for remaining jobs
+                flux.pam.debug_log(
+                    f"housekeeping {jobid}: updating slice for "
+                    f"{count} remaining jobs"
+                )
+                helper.apply_resource_constraints("housekeeping")
+
+    except Exception as e:
+        print(f"flux-pam-housekeeping[{jobid}]: error: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

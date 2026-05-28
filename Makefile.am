@@ -12,6 +12,7 @@ EXTRA_DIST = \
 SUBDIRS = \
 	src/pam \
 	src/bindings/python \
+	src/scripts \
 	etc \
 	doc \
 	t
