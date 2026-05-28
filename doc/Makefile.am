@@ -1,18 +1,22 @@
 .NOTPARALLEL:
 
-MAN_FILES = $(MAN8_FILES)
+MAN_FILES = $(MAN5_FILES) $(MAN8_FILES)
+
+MAN5_FILES = \
+	man5/flux-config-pam.5
 
 MAN8_FILES = \
 	man8/pam_flux.8
 
 RST_FILES = \
+	$(MAN5_FILES:.5=.rst) \
 	$(MAN8_FILES:.8=.rst)
 
 if ENABLE_DOCS
-man_MANS = $(MAN8_FILES)
+man_MANS = $(MAN5_FILES) $(MAN8_FILES)
 endif
 
-SUFFIXES = .rst .8
+SUFFIXES = .rst .5 .8
 
 sphinx_man = $(sphinx_man_$(V))
 sphinx_man_ = $(sphinx_man_$(AM_DEFAULT_VERBOSITY))
@@ -38,7 +42,7 @@ $(MAN_FILES): manpages.py conf.py $(RST_FILES)
 		-m sphinx $(sphinx_verbose_flags) -b man $(srcdir) ./man \
 		$(STDERR_DEVNULL)
 	@echo "  MV	manpages"; \
-	for sec in 8; do \
+	for sec in 5 8; do \
 	  $(MKDIR_P) man$$sec && \
 	  mv -f $(abs_builddir)/man/*.$$sec man$$sec/; \
 	done
@@ -57,6 +61,7 @@ EXTRA_DIST = \
 	domainrefs.py \
 	requirements.txt \
 	$(RST_FILES) \
+	man5/index.rst \
 	man8/index.rst
 
 CLEANFILES = \

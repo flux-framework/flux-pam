@@ -18,6 +18,13 @@ author = "This page is maintained by the Flux community."
 # - Manual section
 man_pages = [
     (
+        "man5/flux-config-pam",
+        "flux-config-pam",
+        "Flux PAM configuration",
+        [author],
+        5,
+    ),
+    (
         "man8/pam_flux",
         "pam_flux",
         "PAM module for access control on Flux clusters",
