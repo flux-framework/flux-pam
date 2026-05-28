@@ -25,6 +25,7 @@ pamtest_SOURCES  = pamtest.c
 pamtest_LDADD    = -lpam -lpam_misc
 
 EXTRA_DIST = \
+	scripts \
 	sharness.sh \
 	sharness.d \
 	python/subflux.py \
