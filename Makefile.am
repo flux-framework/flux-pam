@@ -5,7 +5,8 @@ EXTRA_DIST = \
 	README.md \
 	NOTICE.LLNS \
 	CONTRIBUTING.md \
-	MAINTAINERS.md
+	MAINTAINERS.md \
+	config/tap-driver.sh
 
 SUBDIRS = \
 	src/pam \

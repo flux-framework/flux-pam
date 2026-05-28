@@ -7,7 +7,7 @@ AC_INIT([flux-pam],
 AC_CONFIG_AUX_DIR([config])
 AC_CONFIG_MACRO_DIR([config])
 AC_CONFIG_SRCDIR([NEWS.md])
-AC_PREFIX_DEFAULT([/usr])
+AC_PREFIX_PROGRAM([flux])
 AC_CANONICAL_TARGET
 
 AM_INIT_AUTOMAKE([subdir-objects tar-pax foreign])

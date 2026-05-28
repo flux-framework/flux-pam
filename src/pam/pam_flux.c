@@ -36,6 +36,7 @@
 
 #define PAM_SM_ACCOUNT
 #include <security/pam_modules.h>
+#include <security/pam_ext.h>
 
 struct options {
     /*  If set, permit access to all users if the specified user has
@@ -46,21 +47,6 @@ struct options {
      */
     bool allow_guest_user;
 };
-
-/*
- *  Write message described by the 'format' string to syslog.
- */
-static void log_msg (int level, const char *format, ...)
-{
-    va_list args;
-
-    openlog ("pam_flux", LOG_CONS | LOG_PID, LOG_AUTHPRIV);
-    va_start (args, format);
-    vsyslog (level, format, args);
-    va_end (args);
-    closelog ();
-    return;
-}
 
 static char *uri_to_local (const char *uri)
 {
@@ -87,7 +73,7 @@ static char *uri_to_local (const char *uri)
 /* Return 1 if local instance at uri has access.allow-guest-user=true.
  * Return 0 otherwise.
  */
-static int check_guest_allowed (const char *uri)
+static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
 {
     int allowed = 0;
     flux_t *h = NULL;
@@ -98,11 +84,14 @@ static int check_guest_allowed (const char *uri)
         goto out;
 
     if (!(local_uri = uri_to_local (uri))) {
-        log_msg (LOG_ERR, "failed to transform %s into local uri", uri);
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to transform %s into local uri",
+                    uri);
         goto out;
     }
     if (!(h = flux_open (local_uri, 0))) {
-        log_msg (LOG_ERR, "flux_open (%s): %m", local_uri);
+        pam_syslog (pamh, LOG_ERR, "flux_open (%s): %m", local_uri);
         goto out;
     }
     if (!(f = flux_rpc (h, "config.get", NULL, FLUX_NODEID_ANY, 0))
@@ -110,11 +99,13 @@ static int check_guest_allowed (const char *uri)
                                 "{s?{s?b}}",
                                 "access",
                                  "allow-guest-user", &allowed) < 0) {
-        log_msg (LOG_ERR, "failed to get config: %m");
+        pam_syslog (pamh, LOG_ERR, "failed to get config: %m");
         goto out;
     }
     if (!allowed)
-        log_msg (LOG_INFO, "access.allow-guest-user not enabled in child");
+        pam_syslog (pamh,
+                    LOG_INFO,
+                    "access.allow-guest-user not enabled in child");
 out:
     flux_close (h);
     free (local_uri);
@@ -127,7 +118,8 @@ out:
  *   permit if the job is an instance (has a uri) and acesss.allow-guest-user
  *   is true.
  */
-static int check_jobs_array (json_t *jobs,
+static int check_jobs_array (pam_handle_t *pamh,
+                             json_t *jobs,
                              unsigned int rank,
                              uid_t uid,
                              uid_t allow_if_user)
@@ -147,7 +139,9 @@ static int check_jobs_array (json_t *jobs,
                          "annotations",
                           "user",
                            "uri", &uri) < 0) {
-            log_msg (LOG_ERR, "failed to unpack userid, ranks for job");
+            pam_syslog (pamh,
+                        LOG_ERR,
+                        "failed to unpack userid, ranks for job");
             return 0;
         }
         if (job_uid == uid)
@@ -160,7 +154,7 @@ static int check_jobs_array (json_t *jobs,
                  * access.allow-guest-user is enabled in the job instance:
                  */
                 if (rank == idset_first (ranks))
-                    allowed = check_guest_allowed (uri);
+                    allowed = check_guest_allowed (pamh, uri);
                 idset_destroy (ranks);
                 if (allowed)
                     return 1;
@@ -178,23 +172,19 @@ static uid_t attr_get_uid (flux_t *h, const char *name)
     char *endptr;
     long i;
 
-    if (!(s = flux_attr_get (h, name))) {
-        log_msg (LOG_ERR, "flux_attr_get (%s): %m", name);
+    if (!(s = flux_attr_get (h, name)))
         return (uid_t) -1;
-    }
     errno = 0;
     i = strtol (s, &endptr, 10);
-    if (errno != 0 || *endptr != '\0') {
-        log_msg (LOG_ERR, "error converting %s to uid: %m", name);
+    if (errno != 0 || *endptr != '\0')
         return (uid_t) -1;
-    }
     return (uid_t) i;
 }
 
 
 /*  get jobs in RUN state on this node for user(s) of interest:
  */
-static int flux_check_user (struct options *opts, uid_t uid)
+static int flux_check_user (pam_handle_t *pamh, struct options *opts, uid_t uid)
 {
     int authorized = 0;
     json_t *jobs = NULL;
@@ -211,11 +201,11 @@ static int flux_check_user (struct options *opts, uid_t uid)
     uid_t allow_if_user = uid;
 
     if (!(h = flux_open (NULL, 0))) {
-        log_msg (LOG_ERR, "Unable to connect to Flux: %m");
+        pam_syslog (pamh, LOG_ERR, "Unable to connect to Flux: %m");
         return 0;
     }
     if (flux_get_rank (h, &rank) < 0) {
-        log_msg (LOG_ERR, "Failed to get current broker rank: %m");
+        pam_syslog (pamh, LOG_ERR, "Failed to get current broker rank: %m");
         goto out;
     }
     if (opts->allow_guest_user) {
@@ -223,14 +213,15 @@ static int flux_check_user (struct options *opts, uid_t uid)
         if (owner != (uid_t) -1)
             allow_if_user = owner;
         else
-            log_msg (LOG_ERR,
-                     "Failed to get security.owner, can't allow guest access");
+            pam_syslog (pamh,
+                        LOG_ERR,
+                        "Failed to get security.owner, can't allow guest access");
     }
     if (snprintf (rankstr,
                   sizeof (rankstr),
                   "%u",
                   rank) >= sizeof (rankstr)) {
-        log_msg (LOG_ERR, "Failed to encode broker rank as string: %m");
+        pam_syslog (pamh, LOG_ERR, "Failed to encode broker rank as string: %m");
         goto out;
     }
 
@@ -249,11 +240,11 @@ static int flux_check_user (struct options *opts, uid_t uid)
                          "ranks", rankstr,
                          "states", FLUX_JOB_STATE_RUN);
     if (!f || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
-        log_msg (LOG_ERR, "flux_job_list: %m");
+        pam_syslog (pamh, LOG_ERR, "flux_job_list: %m");
         goto out;
     }
 
-    authorized = check_jobs_array (jobs, rank, uid, allow_if_user);
+    authorized = check_jobs_array (pamh, jobs, rank, uid, allow_if_user);
 
 out:
     flux_future_destroy (f);
@@ -281,9 +272,10 @@ static void send_denial_msg (pam_handle_t *pamh,
      */
     retval = pam_get_item(pamh, PAM_CONV, (const void **) &conv);
     if (retval != PAM_SUCCESS) {
-        log_msg (LOG_ERR,
-                 "unable to get pam_conv: %s",
-                 pam_strerror (pamh, retval));
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "unable to get pam_conv: %s",
+                    pam_strerror (pamh, retval));
         return;
     }
 
@@ -294,7 +286,7 @@ static void send_denial_msg (pam_handle_t *pamh,
                  "Access denied: user %s has no active jobs on this node",
                  user);
     if ((n < 0) || (n >= sizeof(str)))
-        log_msg (LOG_ERR, "exceeded buffer for pam_conv message");
+        pam_syslog (pamh, LOG_ERR, "exceeded buffer for pam_conv message");
 
     msg[0].msg_style = PAM_ERROR_MSG;
     msg[0].msg = str;
@@ -305,9 +297,10 @@ static void send_denial_msg (pam_handle_t *pamh,
      */
     retval = conv->conv(1, pmsg, &prsp, conv->appdata_ptr);
     if (retval != PAM_SUCCESS)
-        log_msg (LOG_ERR,
-                 "unable to converse with app: %s",
-                 pam_strerror (pamh, retval));
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "unable to converse with app: %s",
+                    pam_strerror (pamh, retval));
     if (prsp != NULL) {
         /* N.B. _pam_drop_reply() deprecated in recent versions
          * of Linux-PAM. Free reply without use of macros:
@@ -319,16 +312,53 @@ static void send_denial_msg (pam_handle_t *pamh,
     return;
 }
 
-static int parse_options (struct options *opts, int argc, const char **argv)
+/*  Get UID for PAM_USER. Returns 0 on success, -1 on failure.
+ *  On failure, uid is set to (uid_t)-1.
+ */
+static int get_pam_user_uid (pam_handle_t *pamh, const char **puser, uid_t *uid)
+{
+    const char *user;
+    struct passwd pwd;
+    struct passwd *result;
+    char buf[4096];
+    int retval;
+
+    *uid = (uid_t)-1;
+
+    retval = pam_get_item (pamh, PAM_USER, (const void **) &user);
+    if (retval != PAM_SUCCESS || !user || *user == '\0') {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "unable to get PAM_USER: %s",
+                    pam_strerror (pamh, retval));
+        return -1;
+    }
+
+    if (getpwnam_r (user, &pwd, buf, sizeof (buf), &result) != 0
+        || !result) {
+        pam_syslog (pamh, LOG_ERR, "user %s does not exist", user);
+        return -1;
+    }
+
+    *puser = user;
+    *uid = pwd.pw_uid;
+    return 0;
+}
+
+static int parse_options (pam_handle_t *pamh,
+                          struct options *opts,
+                          int argc,
+                          const char **argv)
 {
     for (int i = 0; i < argc; i++) {
         if (strcmp ("allow-guest-user", argv[i]) == 0) {
             opts->allow_guest_user = true;
         }
         else {
-            log_msg (LOG_ERR,
-                    "unrecognized option: %s",
-                    argv[i]);
+            pam_syslog (pamh,
+                        LOG_ERR,
+                        "unrecognized option: %s",
+                        argv[i]);
             return -1;
         }
     }
@@ -339,30 +369,18 @@ static int parse_options (struct options *opts, int argc, const char **argv)
 PAM_EXTERN int
 pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
-    int retval;
     const char *user;
-    struct passwd *pw;
     uid_t uid;
     int auth = PAM_PERM_DENIED;
     struct options opts = { .allow_guest_user = false };
 
-    retval = pam_get_item (pamh, PAM_USER, (const void **) &user);
-    if ((retval != PAM_SUCCESS) || (user == NULL) || (*user == '\0')) {
-        log_msg (LOG_ERR,
-                 "unable to identify user: %s",
-                 pam_strerror(pamh, retval));
+    if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_USER_UNKNOWN;
-    }
-    if (!(pw = getpwnam (user))) {
-        log_msg (LOG_ERR, "user %s does not exist", user);
-        return PAM_USER_UNKNOWN;
-    }
-    uid = pw->pw_uid;
 
-    if (parse_options (&opts, argc, argv) < 0)
+    if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SYSTEM_ERR;
 
-    if (flux_check_user (&opts, uid))
+    if (flux_check_user (pamh, &opts, uid))
         auth = PAM_SUCCESS;
 
     if (auth != PAM_SUCCESS)
@@ -372,10 +390,11 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
      *  Generate an entry to the system log if access was denied
      */
     if (auth != PAM_SUCCESS) {
-        log_msg (LOG_INFO,
-                 "access %s for user %s (uid=%u)",
-                 (auth == PAM_SUCCESS) ? "granted" : "denied",
-                 user, uid);
+        pam_syslog (pamh,
+                    LOG_INFO,
+                    "access %s for user %s (uid=%u)",
+                    (auth == PAM_SUCCESS) ? "granted" : "denied",
+                    user, uid);
     }
     return auth;
 }

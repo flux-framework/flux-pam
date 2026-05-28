@@ -22,8 +22,8 @@ jobs:
     strategy:
       matrix:
         include:
-        - name: "focal"
-          image: "focal"
+        - name: "noble"
+          image: "noble"
           create_release: true
           env:
             DISTCHECK: t
@@ -31,6 +31,12 @@ jobs:
           image: "el8"
           env:
             chain_lint: t
+        - name: "el9"
+          image: "el9"
+          env: {}
+        - name: "el10"
+          image: "el10"
+          env: {}
         - name: "fedora40"
           image: "fedora40"
           env: {}
