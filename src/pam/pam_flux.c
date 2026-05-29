@@ -34,6 +34,10 @@
 #include <flux/core.h>
 #include <flux/idset.h>
 
+#ifdef HAVE_LIBSYSTEMD
+#include <systemd/sd-bus.h>
+#endif
+
 #define PAM_SM_ACCOUNT
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
@@ -380,6 +384,330 @@ static int parse_options (pam_handle_t *pamh,
     return 0;
 }
 
+#ifdef HAVE_LIBSYSTEMD
+/*  Check if user@$UID.service is active and ready for session attachment.
+ *  The service is started by the Flux prolog when a job begins and stopped
+ *  by housekeeping when the last job ends, so inactive means no active job.
+ *
+ *  Returns  0 if service is running (ActiveState=active, SubState=running).
+ *  Returns -1 if service is not running or an error occurred with specific
+ *             reason set in errmsg
+ */
+static int check_user_service_active (pam_handle_t *pamh,
+                                      uid_t uid,
+                                      bool debug,
+                                      const char **errmsg)
+{
+    sd_bus *bus = NULL;
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *reply = NULL;
+    char unit_name[64];
+    const char *unit_path_raw = NULL;
+    char *unit_path = NULL;
+    char *active_state = NULL;
+    char *sub_state = NULL;
+    int rc = -1;
+
+    *errmsg = "Unable to determine unit state";
+
+    if (snprintf (unit_name,
+                  sizeof (unit_name),
+                  "user@%u.service",
+                  uid) >= sizeof (unit_name)) {
+        pam_syslog (pamh, LOG_ERR, "unit name overflow for uid %u", uid);
+        return -1;
+    }
+
+    /*  Connect to the system bus.
+     */
+    if (sd_bus_open_system (&bus) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to connect to system bus: %m");
+        return -1;
+    }
+
+    /*  Get the unit object path from systemd.  LoadUnit creates a stub entry
+     *  for units that are not yet loaded, so it always returns a path.
+     */
+    if (sd_bus_call_method (bus,
+                            "org.freedesktop.systemd1",
+                            "/org/freedesktop/systemd1",
+                            "org.freedesktop.systemd1.Manager",
+                            "LoadUnit",
+                            &error,
+                            &reply,
+                            "s",
+                            unit_name) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to load unit %s: %s",
+                    unit_name,
+                    error.message ? error.message : "unknown error");
+        goto out;
+    }
+
+    if (sd_bus_message_read (reply, "o", &unit_path_raw) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to parse LoadUnit response: %m");
+        goto out;
+    }
+
+    /*  unit_path_raw points into the reply message buffer and becomes a
+     *  dangling pointer once the message is unreffed below.  Copy it first.
+     */
+    if (!(unit_path = strdup (unit_path_raw))) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "out of memory copying unit path for %s",
+                    unit_name);
+        goto out;
+    }
+
+    sd_bus_message_unref (reply);
+    reply = NULL;
+    sd_bus_error_free (&error);
+
+    if (debug)
+        pam_syslog (pamh, LOG_INFO,
+                    "checking state of %s at D-Bus path %s",
+                    unit_name,
+                    unit_path);
+
+    /*  Get ActiveState property.
+     */
+    if (sd_bus_get_property_string (bus,
+                                    "org.freedesktop.systemd1",
+                                    unit_path,
+                                    "org.freedesktop.systemd1.Unit",
+                                    "ActiveState",
+                                    &error,
+                                    &active_state) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to get ActiveState for %s: %s",
+                    unit_name,
+                    error.message ? error.message : "unknown error");
+        goto out;
+    }
+    sd_bus_error_free (&error);
+
+    /*  Get SubState property.
+     */
+    if (sd_bus_get_property_string (bus,
+                                    "org.freedesktop.systemd1",
+                                    unit_path,
+                                    "org.freedesktop.systemd1.Unit",
+                                    "SubState",
+                                    &error,
+                                    &sub_state) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to get SubState for %s: %s",
+                    unit_name,
+                    error.message ? error.message : "unknown error");
+        goto out;
+    }
+
+    if (strcmp (active_state, "active") == 0
+        && strcmp (sub_state, "running") == 0) {
+        if (debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "%s is active",
+                        unit_name);
+        rc = 0;
+    }
+    else {
+        /*  inactive/dead is the normal case when no Flux job is running for
+         *  this user (prolog starts the service, housekeeping stops it).
+         *  Always log the observed state so the denial reason is auditable.
+         */
+        pam_syslog (pamh,
+                    LOG_INFO,
+                    "%s not running: ActiveState=%s SubState=%s",
+                    unit_name,
+                    active_state,
+                    sub_state);
+        *errmsg = "unit not running";
+        rc = -1;
+    }
+
+out:
+    free (unit_path);
+    free (active_state);
+    free (sub_state);
+    sd_bus_message_unref (reply);
+    sd_bus_error_free (&error);
+    sd_bus_unref (bus);
+    return rc;
+}
+
+/*  Create a transient scope under user-$UID.slice for the login session.
+ *  Scope name: flux-pam-<pid>.scope
+ *  PID alone is sufficient for uniqueness system-wide.
+ *  Returns 0 on success, -1 on error.
+ */
+static int create_session_scope (pam_handle_t *pamh,
+                                 uid_t uid,
+                                 pid_t pid,
+                                 bool debug)
+{
+    sd_bus *bus = NULL;
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *m = NULL;
+    sd_bus_message *reply = NULL;
+    char scope_name[64];
+    char slice_name[64];
+    int rc = -1;
+
+    /*  Generate scope name.
+     */
+    if (snprintf (scope_name,
+                  sizeof (scope_name),
+                  "flux-pam-%d.scope",
+                  pid) >= sizeof (scope_name)) {
+        pam_syslog (pamh, LOG_ERR, "scope name overflow for pid=%d", pid);
+        return -1;
+    }
+
+    if (snprintf (slice_name,
+                  sizeof (slice_name),
+                  "user-%u.slice",
+                  uid) >= sizeof (slice_name)) {
+        pam_syslog (pamh, LOG_ERR, "slice name overflow for uid=%u", uid);
+        return -1;
+    }
+
+    /*  Connect to system bus.
+     */
+    if (sd_bus_open_system (&bus) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to connect to system bus: %m");
+        return -1;
+    }
+
+    /*  Create StartTransientUnit method call.
+     */
+    if (sd_bus_message_new_method_call (bus,
+                                        &m,
+                                        "org.freedesktop.systemd1",
+                                        "/org/freedesktop/systemd1",
+                                        "org.freedesktop.systemd1.Manager",
+                                        "StartTransientUnit") < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to create method call: %m");
+        goto out;
+    }
+
+    /*  Append unit name and mode.
+     */
+    if (sd_bus_message_append (m, "ss", scope_name, "fail") < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to append unit name: %m");
+        goto out;
+    }
+
+    /*  Start properties array.
+     */
+    if (sd_bus_message_open_container (m, 'a', "(sv)") < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to open properties container: %m");
+        goto out;
+    }
+
+    /*  Add Slice property.
+     */
+    if (sd_bus_message_open_container (m, 'r', "sv") < 0
+        || sd_bus_message_append (m, "s", "Slice") < 0
+        || sd_bus_message_open_container (m, 'v', "s") < 0
+        || sd_bus_message_append (m, "s", slice_name) < 0
+        || sd_bus_message_close_container (m) < 0
+        || sd_bus_message_close_container (m) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to append Slice property: %m");
+        goto out;
+    }
+
+    /*  Add PIDs property.
+     */
+    if (sd_bus_message_open_container (m, 'r', "sv") < 0
+        || sd_bus_message_append (m, "s", "PIDs") < 0
+        || sd_bus_message_open_container (m, 'v', "au") < 0
+        || sd_bus_message_open_container (m, 'a', "u") < 0
+        || sd_bus_message_append (m, "u", (uint32_t)pid) < 0
+        || sd_bus_message_close_container (m) < 0
+        || sd_bus_message_close_container (m) < 0
+        || sd_bus_message_close_container (m) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to append PIDs property: %m");
+        goto out;
+    }
+
+    /*  Close properties array.
+     */
+    if (sd_bus_message_close_container (m) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to close properties container: %m");
+        goto out;
+    }
+
+    /*  Append empty aux array.
+     */
+    if (sd_bus_message_append (m, "a(sa(sv))", 0) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to append aux array: %m");
+        goto out;
+    }
+
+    /*  Call the method.
+     */
+    if (sd_bus_call (bus, m, 0, &error, &reply) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "StartTransientUnit(%s) failed: %s",
+                    scope_name,
+                    error.message ? error.message : "unknown error");
+        goto out;
+    }
+
+    if (debug)
+        pam_syslog (pamh,
+                    LOG_INFO,
+                    "created scope %s for userid %u",
+                    scope_name,
+                    uid);
+    rc = 0;
+
+out:
+    sd_bus_message_unref (reply);
+    sd_bus_message_unref (m);
+    sd_bus_error_free (&error);
+    sd_bus_unref (bus);
+    return rc;
+}
+#endif /* HAVE_LIBSYSTEMD */
+
+static int check_pam_manage_user_slice (pam_handle_t *pamh, int *resultp)
+{
+    flux_t *h = NULL;
+    flux_future_t *f = NULL;
+
+    *resultp = 0;
+
+    /* Connect to Flux and fetch config
+     */
+    if (!(h = flux_open (NULL, 0))) {
+        pam_syslog (pamh, LOG_ERR, "failed to connect to Flux: %m");
+        return -1;
+    }
+
+    /*  Fetch broker config via RPC (not cached handle config).
+     */
+    if (!(f = flux_rpc (h, "config.get", NULL, FLUX_NODEID_ANY, 0))
+        || flux_rpc_get_unpack (f,
+                                "{s?:{s?:b}}",
+                                "pam",
+                                "manage-user-slice", resultp) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to fetch broker config: %m");
+        flux_future_destroy (f);
+        flux_close (h);
+        return -1;
+    }
+    flux_future_destroy (f);
+    flux_close (h);
+
+    return 0;
+}
 
 PAM_EXTERN int
 pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
@@ -433,14 +761,188 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
     return auth;
 }
 
+PAM_EXTERN int
+pam_sm_open_session (pam_handle_t *pamh,
+                     int flags,
+                     int argc,
+                     const char **argv)
+{
+    uid_t uid;
+    const char *user;
+    const void *pam_flux_authorized = NULL;
+    int manage_slice;
+    struct options opts = {
+        .allow_guest_user = false,
+        .debug = false
+    };
+
+    if (parse_options (pamh, &opts, argc, argv) < 0)
+        return PAM_SESSION_ERR;
+
+    /*  Session management decision table:
+     *
+     *  pam_flux_authorized is a sentinel set by pam_sm_acct_mgmt when it
+     *  grants access to a direct job owner. Its presence means "this user was
+     *  authorized by pam_flux and has an active job."
+     *
+     *  This implementation assumes pam_systemd.so is absent. Such that
+     *  fall-through in the session PAM stack via PAM_IGNORE will not
+     *  invoke pam_systemd.so, which may interfere with flux-pam management
+     *  of the user slice and user@.service.
+     *
+     *  Scenario 1: sentinel present + manage-slice enabled
+     *    User authorized by pam_flux. Create scope, set env vars, etc.
+     *
+     *  Scenario 2: sentinel present + manage-slice disabled
+     *    User authorized by pam_flux but feature disabled. Return success
+     *    without creating scope.
+     *
+     *  Scenario 3: No sentinel
+     *    User authorized by another module (e.g. pam_access.so for admins).
+     *    Return PAM_IGNORE - session runs in sshd's cgroup.
+     */
+    pam_get_data (pamh, "pam_flux_authorized", &pam_flux_authorized);
+    if (!pam_flux_authorized) {
+        if (opts.debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "skipping session setup because !pam_flux_authorized");
+        return PAM_IGNORE;
+    }
+
+    /*  Sentinel present: user authorized by pam_flux.
+     *  Check if manage-user-slice feature is enabled.
+     */
+    if (get_pam_user_uid (pamh, &user, &uid) < 0)
+        return PAM_SESSION_ERR;
+
+    if (check_pam_manage_user_slice (pamh, &manage_slice) < 0)
+        return PAM_SESSION_ERR;
+
+    /*  Skip attach to user slice if pam.manage-user-slice not set
+     */
+    if (!manage_slice) {
+        if (opts.debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "pam.manage-user-slice not set or false. Skipping.");
+        return PAM_SUCCESS;
+    }
+
+#ifdef HAVE_LIBSYSTEMD
+    pid_t pid = getpid ();
+    const char *errmsg = "unknown";
+
+    /*  Verify user@$UID.service is active before attempting attach.
+     *  The service is started by the Flux prolog and stopped by housekeeping,
+     *  so an inactive service means no active job — deny the login to enforce
+     *  containment.
+     */
+    if (check_user_service_active (pamh, uid, opts.debug, &errmsg) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "user %s: user@%u.service: %s. Denying login",
+                    user,
+                    uid,
+                    errmsg);
+        send_denial_msg (pamh, user, uid);
+        return PAM_SESSION_ERR;
+    }
+
+    /*  Create transient scope for this session.
+     */
+    if (create_session_scope (pamh, uid, pid, opts.debug) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to attach uid=%u: scope creation failed",
+                    uid);
+        return PAM_SESSION_ERR;
+    }
+
+    /*  Set environment variables for the login shell.
+     */
+    char xdg_runtime_dir[64];
+    char dbus_session_bus[128];
+
+    if (snprintf (xdg_runtime_dir,
+                  sizeof (xdg_runtime_dir),
+                  "XDG_RUNTIME_DIR=/run/user/%u",
+                  uid) >= sizeof (xdg_runtime_dir)) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "XDG_RUNTIME_DIR overflow for uid=%u",
+                    uid);
+        return PAM_SESSION_ERR;
+    }
+
+    if (snprintf (dbus_session_bus,
+                  sizeof (dbus_session_bus),
+                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%u/bus",
+                  uid) >= sizeof (dbus_session_bus)) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "DBUS_SESSION_BUS_ADDRESS overflow for uid=%u",
+                    uid);
+        return PAM_SESSION_ERR;
+    }
+
+    if (pam_putenv (pamh, xdg_runtime_dir) != PAM_SUCCESS
+        || pam_putenv (pamh, dbus_session_bus) != PAM_SUCCESS) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to set environment for user %s (uid %u)",
+                    user,
+                    uid);
+        return PAM_SESSION_ERR;
+    }
+
+    /*  Log successful attachment if debug is enabled.
+     */
+    if (opts.debug) {
+        char scope_name[64];
+        snprintf (scope_name, sizeof (scope_name), "flux-pam-%d.scope", pid);
+        pam_syslog (pamh,
+                    LOG_INFO,
+                    "attached user %s uid=%u pid=%d scope=%s",
+                    user,
+                     uid,
+                     pid,
+                     scope_name);
+    }
+#else
+    /*  Without libsystemd, we cannot verify slice state.
+     *  Log a warning and skip attachment.
+     */
+    pam_syslog (pamh,
+                LOG_WARNING,
+                "libsystemd not available, cannot verify slice state");
+    return PAM_SUCCESS;
+#endif
+
+    return PAM_SUCCESS;
+}
+
+PAM_EXTERN int
+pam_sm_close_session (pam_handle_t *pamh,
+                      int flags,
+                      int argc,
+                      const char **argv)
+{
+    /*  The transient scope created in pam_sm_open_session is tied to the
+     *  session PID: systemd automatically stops and removes the scope when
+     *  the last PID in it exits, so no explicit cleanup is required here.
+     */
+    return PAM_SUCCESS;
+}
+
 #ifdef PAM_STATIC
 struct pam_module _pam_flux_modstruct = {
     "pam_flux",
     NULL,
     NULL,
     pam_sm_acct_mgmt,
-    NULL,
-    NULL,
+    pam_sm_open_session,
+    pam_sm_close_session,
     NULL,
 };
 #endif /* PAM_STATIC */
