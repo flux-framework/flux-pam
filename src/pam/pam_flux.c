@@ -46,6 +46,10 @@ struct options {
      *  (Allows guests to access multi-user instance jobs via ssh connector)
      */
     bool allow_guest_user;
+
+    /*  If set, enable debug logging of PAM module
+     */
+    bool debug;
 };
 
 static char *uri_to_local (const char *uri)
@@ -354,6 +358,9 @@ static int parse_options (pam_handle_t *pamh,
         if (strcmp ("allow-guest-user", argv[i]) == 0) {
             opts->allow_guest_user = true;
         }
+        else if (strcmp ("debug", argv[i]) == 0) {
+            opts->debug = true;
+        }
         else {
             pam_syslog (pamh,
                         LOG_ERR,
@@ -392,9 +399,16 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
     if (auth != PAM_SUCCESS) {
         pam_syslog (pamh,
                     LOG_INFO,
-                    "access %s for user %s (uid=%u)",
-                    (auth == PAM_SUCCESS) ? "granted" : "denied",
-                    user, uid);
+                    "access denied for user %s (uid=%u)",
+                    user,
+                    uid);
+    }
+    else if (opts.debug) {
+        pam_syslog (pamh,
+                    LOG_INFO,
+                    "access granted for user %s (uid=%u)",
+                    user,
+                    uid);
     }
     return auth;
 }
