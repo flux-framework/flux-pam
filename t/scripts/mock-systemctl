@@ -1,0 +1,20 @@
+#!/bin/sh
+# Mock systemctl for testing flux-pam prolog/housekeeping
+# Logs actions to systemctl.log in current directory instead of modifying
+# systemd. Includes FLUX_JOB_ID in log line for per-job tracking.
+
+JOBID=$(flux job id --to=f58 $FLUX_JOB_ID </dev/null)
+LOGFILE="${SHARNESS_TRASH_DIRECTORY}/systemctl-${JOBID}.log"
+
+# If MOCK_SYSTEMCTL_FAIL is set, exit 1 when args match its value
+if test -n "${MOCK_SYSTEMCTL_FAIL}" \
+    && echo "$*" | grep -q "${MOCK_SYSTEMCTL_FAIL}"; then
+    echo "mock-systemctl exiting with error due to MOCK_SYSTEMCTL_FAIL" >&2
+    exit 1
+fi
+
+# Log command with timestamp and job ID
+# Format: timestamp jobid command args...
+echo "$(date +%s.%N) $JOBID $*" >> "$LOGFILE"
+
+exit 0

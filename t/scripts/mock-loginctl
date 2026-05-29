@@ -1,0 +1,11 @@
+#!/bin/sh
+# Mock loginctl for testing flux-pam prolog/housekeeping
+# Returns Linger=no by default, or Linger=yes if FLUX_PAM_TEST_LINGER_ENABLED=1
+
+if [ "$FLUX_PAM_TEST_LINGER_ENABLED" = "1" ]; then
+    echo "Linger=yes"
+else
+    echo "Linger=no"
+fi
+
+exit 0

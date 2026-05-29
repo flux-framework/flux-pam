@@ -16,7 +16,8 @@ clean-local:
 	rm -fr trash-directory.* test-results .prove *.broker.log *.output
 
 TESTS = t0001-pam_flux.t \
-	python/t0001-pam.py
+	t0002-prolog-housekeeping.t \
+	python/t0001-pam.py 
 
 dist_check_SCRIPTS = $(TESTS)
 
