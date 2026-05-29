@@ -188,6 +188,7 @@ checks_group "$msg" \
     -e TAP_DRIVER_QUIET=$TAP_DRIVER_QUIET \
     -e FLUX_PAM_TEST_TIMEOUT=$FLUX_TEST_TIMEOUT \
     -e FLUX_PAM_TEST_USER=$FLUX_PAM_TEST_USER \
+    -e FLUX_TESTS_LOGFILE=t \
     -e HOME=/home/$USER \
     -e XDG_RUNTIME_DIR=/run/user/$(id -u) \
     -e DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus \

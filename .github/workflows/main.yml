@@ -30,8 +30,9 @@ jobs:
   ci-checks:
     runs-on: ubuntu-latest
     env:
-      TAP_DRIVER_QUIET: 1
       FLUX_TEST_TIMEOUT: 300
+      FLUX_TESTS_LOGFILE: t
+      debug: t
     timeout-minutes: 20
     strategy:
       matrix:
@@ -112,6 +113,8 @@ jobs:
     env:
       FLUX_TEST_TIMEOUT: 300
       FLUX_PAM_TEST_USER: nobody
+      FLUX_TESTS_LOGFILE: t
+      debug: t
     timeout-minutes: 30
     name: "el8 system tests"
     steps:
