@@ -17,6 +17,7 @@ clean-local:
 
 TESTS = t0001-pam_flux.t \
 	t0002-prolog-housekeeping.t \
+	t0003-pam-session-tests.t \
 	python/t0001-pam.py 
 
 dist_check_SCRIPTS = $(TESTS)
