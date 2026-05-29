@@ -54,6 +54,10 @@ struct options {
     /*  If set, enable debug logging of PAM module
      */
     bool debug;
+
+    /*  Prefix to use for session management scope names, default: flux-pam
+     */
+    const char *scope_prefix;
 };
 
 static char *uri_to_local (const char *uri)
@@ -373,6 +377,9 @@ static int parse_options (pam_handle_t *pamh,
         else if (strcmp ("debug", argv[i]) == 0) {
             opts->debug = true;
         }
+        else if (strncmp ("scope-prefix=", argv[i], 13) == 0) {
+            opts->scope_prefix = argv[i] + 13;
+        }
         else {
             pam_syslog (pamh,
                         LOG_ERR,
@@ -546,6 +553,7 @@ out:
  *  Returns 0 on success, -1 on error.
  */
 static int create_session_scope (pam_handle_t *pamh,
+                                 const char *scope_name,
                                  uid_t uid,
                                  pid_t pid,
                                  bool debug)
@@ -554,19 +562,8 @@ static int create_session_scope (pam_handle_t *pamh,
     sd_bus_error error = SD_BUS_ERROR_NULL;
     sd_bus_message *m = NULL;
     sd_bus_message *reply = NULL;
-    char scope_name[64];
     char slice_name[64];
     int rc = -1;
-
-    /*  Generate scope name.
-     */
-    if (snprintf (scope_name,
-                  sizeof (scope_name),
-                  "flux-pam-%d.scope",
-                  pid) >= sizeof (scope_name)) {
-        pam_syslog (pamh, LOG_ERR, "scope name overflow for pid=%d", pid);
-        return -1;
-    }
 
     if (snprintf (slice_name,
                   sizeof (slice_name),
@@ -773,7 +770,8 @@ pam_sm_open_session (pam_handle_t *pamh,
     int manage_slice;
     struct options opts = {
         .allow_guest_user = false,
-        .debug = false
+        .debug = false,
+        .scope_prefix = "flux-pam"
     };
 
     if (parse_options (pamh, &opts, argc, argv) < 0)
@@ -830,8 +828,23 @@ pam_sm_open_session (pam_handle_t *pamh,
     }
 
 #ifdef HAVE_LIBSYSTEMD
+    char scope_name[128];
     pid_t pid = getpid ();
     const char *errmsg = "unknown";
+
+    /* Generate scope name
+     */
+    if (snprintf (scope_name,
+                  sizeof (scope_name),
+                  "%s-%d.scope",
+                  opts.scope_prefix,
+                  pid) >= sizeof (scope_name)) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to generate scope name for prefix=%s",
+                    opts.scope_prefix);
+        return PAM_SESSION_ERR;
+    }
 
     /*  Verify user@$UID.service is active before attempting attach.
      *  The service is started by the Flux prolog and stopped by housekeeping,
@@ -851,7 +864,7 @@ pam_sm_open_session (pam_handle_t *pamh,
 
     /*  Create transient scope for this session.
      */
-    if (create_session_scope (pamh, uid, pid, opts.debug) < 0) {
+    if (create_session_scope (pamh, scope_name, uid, pid, opts.debug) < 0) {
         pam_syslog (pamh,
                     LOG_ERR,
                     "failed to attach uid=%u: scope creation failed",
@@ -899,15 +912,13 @@ pam_sm_open_session (pam_handle_t *pamh,
     /*  Log successful attachment if debug is enabled.
      */
     if (opts.debug) {
-        char scope_name[64];
-        snprintf (scope_name, sizeof (scope_name), "flux-pam-%d.scope", pid);
         pam_syslog (pamh,
                     LOG_INFO,
                     "attached user %s uid=%u pid=%d scope=%s",
                     user,
-                     uid,
-                     pid,
-                     scope_name);
+                    uid,
+                    pid,
+                    scope_name);
     }
 #else
     /*  Without libsystemd, we cannot verify slice state.
