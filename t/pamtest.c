@@ -23,6 +23,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <errno.h>
+#include <syslog.h>
 
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
@@ -137,6 +138,11 @@ int do_pam_setup (pam_handle_t **ppamh, struct program_opts *opt)
     pam_handle_t *pamh;
 
     /*
+     * Configure syslog to also write to stderr for PAM module logging
+     */
+    openlog(opt->service, LOG_PERROR | LOG_PID, LOG_AUTH);
+
+    /*
      * Initialize PAM interface and read system configration file
      */
     log_verbose ("pam_start (\"%s\", \"%s\", misc_conv, &pamh)\n",
@@ -224,6 +230,7 @@ int do_pam_end (pam_handle_t *pamh, struct program_opts *opt)
     }
     log_verbose ("pam_end (pamh, PAM_SUCCESS)\n");
     pam_end (pamh, PAM_SUCCESS);
+    closelog ();
     return (0);
 }
 
