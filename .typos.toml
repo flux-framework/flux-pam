@@ -1,0 +1,5 @@
+[files]
+extend-exclude = [
+  "config/*",
+  "t/sharness.sh",
+]

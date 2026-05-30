@@ -143,7 +143,7 @@ int do_pam_setup (pam_handle_t **ppamh, struct program_opts *opt)
     openlog(opt->service, LOG_PERROR | LOG_PID, LOG_AUTH);
 
     /*
-     * Initialize PAM interface and read system configration file
+     * Initialize PAM interface and read system configuration file
      */
     log_verbose ("pam_start (\"%s\", \"%s\", misc_conv, &pamh)\n",
                  opt->service, opt->user);

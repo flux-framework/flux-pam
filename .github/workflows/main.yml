@@ -27,6 +27,13 @@ jobs:
     - name: format and linting checks
       run: pre-commit run --all-files
 
+  spelling:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6.0.2
+    - name: Check Spelling
+      uses: crate-ci/typos@v1.46.0
+
   ci-checks:
     runs-on: ubuntu-latest
     env:

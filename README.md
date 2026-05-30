@@ -9,7 +9,7 @@ that Flux is being used as the system resource manager.
 The `pam_flux` PAM module requires PAM development libraries to build. For
 example, `pam-devel` on RedHat based systems or `libpam-dev` on Debian
 based hosts. This is an autotools project, so recent versions of `autoconf`,
-`automake`, and `libtool` are also requied.
+`automake`, and `libtool` are also required.
 
 Once the prerequisites have been installed, build with
 ```

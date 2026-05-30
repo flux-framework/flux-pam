@@ -40,7 +40,7 @@ Options:\n\
      --no-home                 Skip mounting the host home directory\n\
      --install-only            Skip make check, only make install\n\
      --inception               Run tests as flux jobs\n\
-     --build-arg ARG=VAL       Add extra --buil-args to to docker build\n\
+     --build-arg ARG=VAL       Add extra --build-args to to docker build\n\
  -q, --quiet                   Add --quiet to docker-build\n\
  -t, --tag=TAG                 If checks succeed, tag image as NAME\n\
  -i, --image=NAME              Use base docker image NAME (default=$IMAGE)\n\
