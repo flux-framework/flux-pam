@@ -253,8 +253,8 @@ out:
 }
 
 /*
- *  Sends a message to the application informing the user
- *  that access was denied due to Slurm.
+ *  Sends a message to the application informing the user that access
+ *  was denied. Used by both pam_sm_acct_mgmt and pam_sm_open_session.
  */
 static void send_denial_msg (pam_handle_t *pamh,
                              const char *user,
