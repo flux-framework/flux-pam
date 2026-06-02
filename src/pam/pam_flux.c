@@ -22,11 +22,15 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <jansson.h>
@@ -58,6 +62,10 @@ struct options {
     /*  Prefix to use for session management scope names, default: flux-pam
      */
     const char *scope_prefix;
+
+    /*  Directory for per-user lock files, default: /run/flux-pam
+     */
+    const char *lock_dir;
 };
 
 static char *uri_to_local (const char *uri)
@@ -380,6 +388,9 @@ static int parse_options (pam_handle_t *pamh,
         else if (strncmp ("scope-prefix=", argv[i], 13) == 0) {
             opts->scope_prefix = argv[i] + 13;
         }
+        else if (strncmp ("lock-dir=", argv[i], 9) == 0) {
+            opts->lock_dir = argv[i] + 9;
+        }
         else {
             pam_syslog (pamh,
                         LOG_ERR,
@@ -672,6 +683,53 @@ out:
     sd_bus_unref (bus);
     return rc;
 }
+/*  Acquire exclusive per-user flock at /run/flux-pam/uid.<uid>.lock,
+ *  serializing pam_sm_open_session with prolog/housekeeping scripts.
+ *  Returns fd on success (caller must close to release), -1 on error.
+ */
+static int user_lock_acquire (pam_handle_t *pamh,
+                              uid_t uid,
+                              const char *lock_dir)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    int fd;
+
+    /* Verify lock directory is only writable by root */
+    if (stat (lock_dir, &st) < 0) {
+        pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+        return -1;
+    }
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) {
+        pam_syslog (pamh, LOG_ERR,
+                    "lock dir %s must not be group/other writable (mode=%04o)",
+                    lock_dir, st.st_mode & 0777);
+        return -1;
+    }
+
+    if (snprintf (path, sizeof (path), "%s/uid.%u.lock", lock_dir, uid)
+        >= sizeof (path)) {
+        pam_syslog (pamh, LOG_ERR, "lock path overflow for uid=%u", uid);
+        return -1;
+    }
+    if ((fd = open (path, O_CREAT | O_RDWR | O_NOFOLLOW, 0600)) < 0) {
+        pam_syslog (pamh, LOG_ERR, "open lock uid=%u: %m", uid);
+        return -1;
+    }
+    if (flock (fd, LOCK_EX) < 0) {
+        pam_syslog (pamh, LOG_ERR, "flock uid=%u: %m", uid);
+        close (fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void user_lock_release (int fd)
+{
+    if (fd >= 0)
+        close (fd);
+}
+
 #endif /* HAVE_LIBSYSTEMD */
 
 static int check_pam_manage_user_slice (pam_handle_t *pamh, int *resultp)
@@ -771,7 +829,8 @@ pam_sm_open_session (pam_handle_t *pamh,
     struct options opts = {
         .allow_guest_user = false,
         .debug = false,
-        .scope_prefix = "flux-pam"
+        .scope_prefix = "flux-pam",
+        .lock_dir = "/run/flux-pam"
     };
 
     if (parse_options (pamh, &opts, argc, argv) < 0)
@@ -831,6 +890,7 @@ pam_sm_open_session (pam_handle_t *pamh,
     char scope_name[128];
     pid_t pid = getpid ();
     const char *errmsg = "unknown";
+    int lock_fd;
 
     /* Generate scope name
      */
@@ -846,6 +906,13 @@ pam_sm_open_session (pam_handle_t *pamh,
         return PAM_SESSION_ERR;
     }
 
+    /*  Serialize service check + scope creation with prolog/housekeeping to
+     *  prevent a TOCTOU where housekeeping stops the service between our
+     *  check and StartTransientUnit.
+     */
+    if ((lock_fd = user_lock_acquire (pamh, uid, opts.lock_dir)) < 0)
+        return PAM_SESSION_ERR;
+
     /*  Verify user@$UID.service is active before attempting attach.
      *  The service is started by the Flux prolog and stopped by housekeeping,
      *  so an inactive service means no active job — deny the login to enforce
@@ -859,6 +926,7 @@ pam_sm_open_session (pam_handle_t *pamh,
                     uid,
                     errmsg);
         send_denial_msg (pamh, user, uid);
+        user_lock_release (lock_fd);
         return PAM_SESSION_ERR;
     }
 
@@ -869,8 +937,11 @@ pam_sm_open_session (pam_handle_t *pamh,
                     LOG_ERR,
                     "failed to attach uid=%u: scope creation failed",
                     uid);
+        user_lock_release (lock_fd);
         return PAM_SESSION_ERR;
     }
+
+    user_lock_release (lock_fd);
 
     /*  Set environment variables for the login shell.
      */
