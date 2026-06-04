@@ -1,0 +1,115 @@
+#!@FLUX@ python
+
+###############################################################
+# Copyright 2025 Lawrence Livermore National Security, LLC
+# (c.f. AUTHORS, NOTICE.LLNS, COPYING)
+#
+# This file is part of the Flux resource manager framework.
+# For details, see https://github.com/flux-framework.
+#
+# SPDX-License-Identifier: LGPL-3.0
+###############################################################
+
+"""
+flux-pam-prolog: Prolog script for flux-pam systemd integration.
+
+Invoked by flux-imp before a job starts. Manages user@.service lifecycle
+and applies resource constraints to the user's systemd slice.
+
+Environment variables (set by flux-imp):
+    FLUX_JOB_USERID: User ID of job owner
+    FLUX_JOB_ID: Job ID being started
+"""
+
+import os
+import subprocess
+import sys
+
+import flux.job
+import flux.pam
+
+SYSTEMCTL = os.environ.get("FLUX_PAM_TEST_SYSTEMCTL", "@SYSTEMCTL@")
+LOGINCTL = os.environ.get("FLUX_PAM_TEST_LOGINCTL", "@LOGINCTL@")
+
+
+def main():
+    """Main entry point for prolog script."""
+    # Get job info from environment
+    try:
+        userid = int(os.environ["FLUX_JOB_USERID"])
+        jobid = flux.job.JobID(os.environ["FLUX_JOB_ID"])
+    except KeyError as e:
+        print(f"flux-pam-prolog: missing {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"flux-pam-prolog: invalid job info: {e}", file=sys.stderr)
+        return 1
+
+    # Use PAMHelper to manage systemd resources
+    try:
+        with flux.pam.PAMHelper(
+            userid, jobid, systemctl=SYSTEMCTL, loginctl=LOGINCTL
+        ) as helper:
+            flux.pam.debug_log(
+                f"prolog {jobid}: rank={helper.rank} uid={userid}"
+            )
+
+            # Skip if feature disabled or instance owner
+            if helper.should_skip():
+                flux.pam.debug_log(f"prolog {jobid}: skipping (disabled or owner)")
+                return 0
+
+            # Check if linger is enabled (must be disabled)
+            try:
+                if helper.check_linger():
+                    print(
+                        f"flux-pam-prolog[{jobid}]: linger enabled for uid {userid}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                flux.pam.debug_log(f"prolog {jobid}: linger check passed")
+            except (subprocess.TimeoutExpired, ValueError) as e:
+                print(
+                    f"flux-pam-prolog[{jobid}]: linger check failed: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            # Count other active jobs on this rank for resource constraints
+            count = helper.active_local_jobs()
+            flux.pam.debug_log(
+                f"prolog {jobid}: found {count} other active jobs for uid={userid}"
+            )
+
+            # Start user service (idempotent: no-op if already running)
+            flux.pam.debug_log(f"prolog {jobid}: starting user@{userid}.service")
+            try:
+                helper.user_service_start()
+            except Exception as e:
+                print(
+                    f"flux-pam-prolog[{jobid}]: failed to start service: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            # Apply resource constraints (includes current job)
+            try:
+                helper.apply_resource_constraints(
+                    "prolog", include_current=True
+                )
+            except Exception as e:
+                print(
+                    f"flux-pam-prolog[{jobid}]: failed to apply constraints: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+
+    except Exception as e:
+        print(f"flux-pam-prolog[{jobid}]: error: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

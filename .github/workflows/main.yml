@@ -13,11 +13,33 @@ jobs:
     - run: git fetch origin main
     - uses: flux-framework/pr-validator@master
 
+  python-lint:
+    name: python linting
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/setup-python@v6.2.0
+    - uses: actions/checkout@v6.0.2
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
+    - name: install linting and formatting deps
+      run: pip install -r scripts/requirements-dev.txt
+    - name: format and linting checks
+      run: pre-commit run --all-files
+
+  spelling:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6.0.2
+    - name: Check Spelling
+      uses: crate-ci/typos@v1.46.0
+
   ci-checks:
     runs-on: ubuntu-latest
     env:
-      TAP_DRIVER_QUIET: 1
       FLUX_TEST_TIMEOUT: 300
+      FLUX_TESTS_LOGFILE: t
+      debug: t
     timeout-minutes: 20
     strategy:
       matrix:
@@ -92,3 +114,29 @@ jobs:
         files: flux-pam*.tar.gz
         body: |
           View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ matrix.tag }}/NEWS.md) for flux-pam ${{ steps.tag.output.TAG }}
+
+  system-tests:
+    runs-on: ubuntu-latest
+    env:
+      FLUX_TEST_TIMEOUT: 300
+      FLUX_PAM_TEST_USER: nobody
+      FLUX_TESTS_LOGFILE: t
+      debug: t
+    timeout-minutes: 30
+    name: "el8 system tests"
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+       ref: ${{ github.event.pull_request.head.sha }}
+       fetch-depth: 0
+
+    - name: docker-run-systest
+      run: |
+        ./src/test/docker/docker-run-systest.sh \
+          -j $(nproc) \
+          -i el8
+
+    - name: annotate errors
+      if: failure() || cancelled()
+      run: src/test/checks-annotate.sh

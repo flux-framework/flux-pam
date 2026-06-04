@@ -14,4 +14,5 @@ flux-pam Manual Pages
 .. toctree::
    :maxdepth: 2
 
+   man5/index
    man8/index

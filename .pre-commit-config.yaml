@@ -1,0 +1,47 @@
+files: '^(src/(bindings/python|cmd|scripts)|t/python)'
+exclude: '^t/python/(tap|subflux\.py)'
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+
+  - repo: local
+    hooks:
+      - id: black
+        name: black
+        language: python
+        types: [python]
+        entry: black
+
+      - id: isort
+        name: isort
+        args: [--filter-files]
+        language: python
+        types: [python]
+        entry: isort
+
+      - id: flake8
+        name: flake8
+        language: python
+        types: [python]
+        entry: flake8
+        additional_dependencies: [Flake8-pyproject]
+
+      - id: mypy
+        name: mypy
+        language: python
+        types: [python]
+        entry: mypy
+        additional_dependencies: [mypy==0.931]
+        exclude: '^(src/bindings/python/|src/scripts/)'
+  - repo: https://github.com/netromdk/vermin
+    rev: v1.6.0
+    hooks:
+      - id: vermin
+        args: ['-t=3.6-', '--violations']
