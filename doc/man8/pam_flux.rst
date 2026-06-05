@@ -143,6 +143,21 @@ session module and are handled by subsequent modules::
 NOTES
 =====
 
+systemd-user Service
+--------------------
+
+``pam_flux.so`` automatically skips when invoked from the systemd-user PAM
+service (the service systemd uses to start ``user@$UID.service``). This
+prevents a circular dependency: the systemd-user stack runs during the
+startup of ``user@$UID.service``, but ``pam_flux.so`` needs to query and
+interact with that service. The module returns ``PAM_IGNORE`` for both
+account and session functions when ``PAM_SERVICE`` is ``systemd-user``.
+
+In practice, ``pam_flux.so`` should not normally appear in
+``/etc/pam.d/systemd-user`` anyway. However, if your site uses shared PAM
+includes (e.g., ``@include common-account``) that bring ``pam_flux.so`` into
+the systemd-user stack, this automatic skip ensures correct behavior.
+
 cgroup v2 Requirement
 ---------------------
 
