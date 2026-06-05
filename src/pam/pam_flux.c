@@ -407,7 +407,8 @@ static int parse_options (pam_handle_t *pamh,
  *  The service is started by the Flux prolog when a job begins and stopped
  *  by housekeeping when the last job ends, so inactive means no active job.
  *
- *  Returns  0 if service is running (ActiveState=active, SubState=running).
+ *  Returns  0 if service is active or activating (mirrors systemd's
+ *             UNIT_IS_ACTIVE_OR_ACTIVATING macro).
  *  Returns -1 if service is not running or an error occurred with specific
  *             reason set in errmsg
  */
@@ -524,12 +525,17 @@ static int check_user_service_active (pam_handle_t *pamh,
         goto out;
     }
 
+    /* Mirror systemd's own UNIT_IS_ACTIVE_OR_ACTIVATING macro when
+     * checking for an active or activating user@UID service:
+     */
     if (strcmp (active_state, "active") == 0
-        && strcmp (sub_state, "running") == 0) {
+        || strcmp (active_state, "activating") == 0
+        || strcmp (active_state, "reloading") == 0
+        || strcmp (active_state, "refreshing") == 0) {
         if (debug)
             pam_syslog (pamh,
                         LOG_INFO,
-                        "%s is active",
+                        "%s is active or activating",
                         unit_name);
         rc = 0;
     }
