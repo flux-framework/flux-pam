@@ -424,7 +424,6 @@ static int check_user_service_active (pam_handle_t *pamh,
     const char *unit_path_raw = NULL;
     char *unit_path = NULL;
     char *active_state = NULL;
-    char *sub_state = NULL;
     int rc = -1;
 
     *errmsg = "Unable to determine unit state";
@@ -508,23 +507,6 @@ static int check_user_service_active (pam_handle_t *pamh,
     }
     sd_bus_error_free (&error);
 
-    /*  Get SubState property.
-     */
-    if (sd_bus_get_property_string (bus,
-                                    "org.freedesktop.systemd1",
-                                    unit_path,
-                                    "org.freedesktop.systemd1.Unit",
-                                    "SubState",
-                                    &error,
-                                    &sub_state) < 0) {
-        pam_syslog (pamh,
-                    LOG_ERR,
-                    "failed to get SubState for %s: %s",
-                    unit_name,
-                    error.message ? error.message : "unknown error");
-        goto out;
-    }
-
     /* Mirror systemd's own UNIT_IS_ACTIVE_OR_ACTIVATING macro when
      * checking for an active or activating user@UID service:
      */
@@ -546,18 +528,16 @@ static int check_user_service_active (pam_handle_t *pamh,
          */
         pam_syslog (pamh,
                     LOG_INFO,
-                    "%s not running: ActiveState=%s SubState=%s",
+                    "%s not active or activating: ActiveState=%s",
                     unit_name,
-                    active_state,
-                    sub_state);
-        *errmsg = "unit not running";
+                    active_state);
+        *errmsg = "unit not active or activating";
         rc = -1;
     }
 
 out:
     free (unit_path);
     free (active_state);
-    free (sub_state);
     sd_bus_message_unref (reply);
     sd_bus_error_free (&error);
     sd_bus_unref (bus);
