@@ -131,4 +131,32 @@ test_expect_success 'pam_flux: access denied if not rank 0 of job' '
 	flux cancel $id &&
 	flux job wait-event -vt 15 $id clean
 '
+test_expect_success 'pam_flux: create systemd-user PAM stack' '
+	cat <<-EOF >systemd-user
+	auth    required   pam_localuser.so
+	account required   ${PAM_FLUX_PATH} debug
+	account required   pam_permit.so
+	EOF
+'
+test_expect_success 'pam_flux: module skips systemd-user service (no job)' '
+	LD_PRELOAD=libpam_wrapper.so \
+	PAM_WRAPPER=1 \
+	PAM_WRAPPER_DEBUGLEVEL=2 \
+	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+	${PAMTEST} -v -s systemd-user -u ${USER} >systemd-user.out 2>&1 &&
+	test_debug "cat systemd-user.out" &&
+	grep "skipping for systemd-user service" systemd-user.out
+'
+test_expect_success 'pam_flux: module skips systemd-user service (with job)' '
+	jobid=$(flux submit --wait-event=alloc sleep 300) &&
+	LD_PRELOAD=libpam_wrapper.so \
+	PAM_WRAPPER=1 \
+	PAM_WRAPPER_DEBUGLEVEL=2 \
+	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+	${PAMTEST} -v -s systemd-user -u ${USER} >systemd-user2.out 2>&1 &&
+	test_debug "cat systemd-user2.out" &&
+	grep "skipping for systemd-user service" systemd-user2.out &&
+	flux cancel $jobid &&
+	flux job wait-event -vt 15 $jobid free
+'
 test_done

@@ -275,6 +275,35 @@ test_expect_success 'lock-dir-perms: cancel last test job' '
 test_expect_success 'lock-dir-perms: cleanup other-writable directory' '
 	sudo rm -rf bad-lock-dir2
 '
+test_expect_success 'systemd-user: create PAM stack' '
+	cat <<-EOF >systemd-user
+	auth    required   pam_localuser.so
+	account sufficient pam_succeed_if.so uid < 500
+	account sufficient ${PAM_FLUX_PATH}
+	account required   pam_permit.so
+	session requisite  ${PAM_FLUX_PATH} debug
+	session required   pam_unix.so
+	EOF
+'
+test_expect_success 'systemd-user: submit test job' '
+	jobid=$(submit_as_guest 5m sleep 300) &&
+	flux job wait-event $jobid start
+'
+test_expect_success 'systemd-user: session skips systemd-user service' '
+	sudo FLUX_URI=${FLUX_URI} \
+	LD_PRELOAD=libpam_wrapper.so \
+	PAM_WRAPPER=1 \
+	PAM_WRAPPER_DEBUGLEVEL=2 \
+	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+	${PAMTEST} -v -S -s systemd-user -u ${TEST_USER} \
+		>systemd-user.out 2>&1 &&
+	test_debug "cat systemd-user.out" &&
+	grep "skipping for systemd-user service" systemd-user.out
+'
+test_expect_success 'systemd-user: cancel test job' '
+	flux cancel $jobid &&
+	flux job wait-event -vt 20 $jobid clean
+'
 test_expect_success 'cleanup test scopes' '
 	reset_test_scopes
 '

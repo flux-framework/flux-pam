@@ -407,7 +407,8 @@ static int parse_options (pam_handle_t *pamh,
  *  The service is started by the Flux prolog when a job begins and stopped
  *  by housekeeping when the last job ends, so inactive means no active job.
  *
- *  Returns  0 if service is running (ActiveState=active, SubState=running).
+ *  Returns  0 if service is active or activating (mirrors systemd's
+ *             UNIT_IS_ACTIVE_OR_ACTIVATING macro).
  *  Returns -1 if service is not running or an error occurred with specific
  *             reason set in errmsg
  */
@@ -423,7 +424,6 @@ static int check_user_service_active (pam_handle_t *pamh,
     const char *unit_path_raw = NULL;
     char *unit_path = NULL;
     char *active_state = NULL;
-    char *sub_state = NULL;
     int rc = -1;
 
     *errmsg = "Unable to determine unit state";
@@ -507,29 +507,17 @@ static int check_user_service_active (pam_handle_t *pamh,
     }
     sd_bus_error_free (&error);
 
-    /*  Get SubState property.
+    /* Mirror systemd's own UNIT_IS_ACTIVE_OR_ACTIVATING macro when
+     * checking for an active or activating user@UID service:
      */
-    if (sd_bus_get_property_string (bus,
-                                    "org.freedesktop.systemd1",
-                                    unit_path,
-                                    "org.freedesktop.systemd1.Unit",
-                                    "SubState",
-                                    &error,
-                                    &sub_state) < 0) {
-        pam_syslog (pamh,
-                    LOG_ERR,
-                    "failed to get SubState for %s: %s",
-                    unit_name,
-                    error.message ? error.message : "unknown error");
-        goto out;
-    }
-
     if (strcmp (active_state, "active") == 0
-        && strcmp (sub_state, "running") == 0) {
+        || strcmp (active_state, "activating") == 0
+        || strcmp (active_state, "reloading") == 0
+        || strcmp (active_state, "refreshing") == 0) {
         if (debug)
             pam_syslog (pamh,
                         LOG_INFO,
-                        "%s is active",
+                        "%s is active or activating",
                         unit_name);
         rc = 0;
     }
@@ -540,18 +528,16 @@ static int check_user_service_active (pam_handle_t *pamh,
          */
         pam_syslog (pamh,
                     LOG_INFO,
-                    "%s not running: ActiveState=%s SubState=%s",
+                    "%s not active or activating: ActiveState=%s",
                     unit_name,
-                    active_state,
-                    sub_state);
-        *errmsg = "unit not running";
+                    active_state);
+        *errmsg = "unit not active or activating";
         rc = -1;
     }
 
 out:
     free (unit_path);
     free (active_state);
-    free (sub_state);
     sd_bus_message_unref (reply);
     sd_bus_error_free (&error);
     sd_bus_unref (bus);
@@ -768,6 +754,7 @@ PAM_EXTERN int
 pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
     const char *user;
+    const char *service = NULL;
     uid_t uid;
     int auth = PAM_PERM_DENIED;
     flux_auth_t result;
@@ -778,6 +765,17 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
 
     if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SYSTEM_ERR;
+
+    /*  Skip systemd-user service - it's starting user@UID.service itself.
+     *  Checking the slice from within that service's own startup is circular
+     *  and not meaningful.
+     */
+    pam_get_item (pamh, PAM_SERVICE, (const void **) &service);
+    if (service && strcmp (service, "systemd-user") == 0) {
+        if (opts.debug)
+            pam_syslog (pamh, LOG_INFO, "skipping for systemd-user service");
+        return PAM_IGNORE;
+    }
 
     result = flux_check_user (pamh, &opts, uid);
     if (result != FLUX_AUTH_DENIED) {
@@ -824,6 +822,7 @@ pam_sm_open_session (pam_handle_t *pamh,
 {
     uid_t uid;
     const char *user;
+    const char *service = NULL;
     const void *pam_flux_authorized = NULL;
     int manage_slice;
     struct options opts = {
@@ -835,6 +834,17 @@ pam_sm_open_session (pam_handle_t *pamh,
 
     if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SESSION_ERR;
+
+    /*  Skip systemd-user service - it's starting user@UID.service itself.
+     *  Creating a scope under user-UID.slice from within that service's own
+     *  startup is circular and not meaningful.
+     */
+    pam_get_item (pamh, PAM_SERVICE, (const void **) &service);
+    if (service && strcmp (service, "systemd-user") == 0) {
+        if (opts.debug)
+            pam_syslog (pamh, LOG_INFO, "skipping for systemd-user service");
+        return PAM_IGNORE;
+    }
 
     /*  Session management decision table:
      *
