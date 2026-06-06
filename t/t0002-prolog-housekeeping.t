@@ -16,13 +16,15 @@ HOUSEKEEPING=${FLUX_BUILD_DIR}/src/scripts/flux-pam-housekeeping
 SCRIPTSDIR=${SHARNESS_TEST_SRCDIR}/scripts
 export FLUX_PAM_TEST_SYSTEMCTL=${SCRIPTSDIR}/mock-systemctl
 export FLUX_PAM_TEST_LOGINCTL=${SCRIPTSDIR}/mock-loginctl
-export PYTHONPATH=${FLUX_SOURCE_DIR}/src/bindings/python:${PYTHONPATH}
 
 # Use temporary dir for lock files
 export FLUX_PAM_LOCK_DIR=$(pwd)/lock
 
 # Enable debug logging from prolog/housekeeping
 export FLUX_PAM_SCRIPTS_DEBUG=1
+
+# Ensure flux python loads from source directory
+export FLUX_PYTHONPATH_PREPEND=${FLUX_SOURCE_DIR}/src/bindings/python
 
 test_under_flux 4
 
