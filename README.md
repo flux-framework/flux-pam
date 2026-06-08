@@ -22,9 +22,14 @@ resource constraints as the job.
 
 **Prolog and housekeeping scripts** — `flux-pam-prolog` and
 `flux-pam-housekeeping` run on each compute node at job start and
-completion. They manage the `user@UID.service` lifecycle and, when
-resource constraining is enabled, apply CPU, memory, and device limits
-to the user's systemd slice.
+completion. The prolog applies resource constraints to the user slice,
+creates an active marker file, and best-effort starts `user@UID.service`.
+Housekeeping updates constraints as jobs end and clears the marker when
+the user's last job completes. The PAM session module checks for the
+marker's presence under lock before admitting logins, ensuring
+containment is set up. Slice-based containment works even when
+`user@UID.service` fails to start (e.g., on nodes with `/proc` mounted
+`hidepid=2`).
 
 ## Requirements
 
@@ -88,9 +93,13 @@ account  sufficient  pam_flux.so allow-guest-user
 ### Full configuration with session management
 
 Session management places each login inside the user's systemd slice,
-enforcing the same resource limits as their job. It requires
-`pam.manage-user-slice = true` in the Flux system configuration and the
-prolog/housekeeping scripts to be active (see below).
+enforcing the same resource limits as their job. Logins are admitted only
+when an active marker file exists, which the prolog creates after applying
+constraints and housekeeping removes at last-job teardown. This ensures
+sessions cannot attach before containment is ready or after it has been
+torn down. Session management requires `pam.manage-user-slice = true` in
+the Flux system configuration and the prolog/housekeeping scripts to be
+active (see below).
 
 ```
 # /etc/pam.d/sshd (or equivalent)
@@ -123,7 +132,7 @@ Enable slice lifecycle management and, optionally, resource constraints:
 # /etc/flux/system/conf.d/pam.toml
 
 [pam]
-manage-user-slice = true      # start/stop user@UID.service with jobs
+manage-user-slice = true      # enable slice lifecycle and marker management
 
 [exec]
 service = "sdexec"
