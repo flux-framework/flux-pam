@@ -1,3 +1,11 @@
+flux-pam version 0.4.0 - 2026-06-08
+-----------------------------------
+
+ * doc: add introduction to documentation index (#24)
+ * pam: fix `pam_flux.so` interaction with systemd-user PAM service (#23)
+ * switch to marker-based slice containment instead of managing user@UID
+   service (#26)
+
 flux-pam version 0.3.0 - 2026-06-04
 -----------------------------------
 
