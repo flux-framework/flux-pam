@@ -77,6 +77,11 @@ def rerun_under_flux(size=1, personality="full"):
     if "FLUX_BUILD_DIR" in os.environ:
         child_env["FLUX_BUILD_DIR"] = os.environ["FLUX_BUILD_DIR"]
 
+    # Ensure flux.pam in builddir overrides installed flux.pam
+    child_env["FLUX_PYTHONPATH_PREPEND"] = (
+        script_dir + "/../../src/bindings/python"
+    )
+
     sanitize_env(child_env)
 
     command = [flux_exe, "start", "--test-size", str(size)]

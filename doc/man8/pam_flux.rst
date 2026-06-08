@@ -33,14 +33,11 @@ When ``pam.manage-user-slice`` is enabled in the Flux configuration (see
 :man5:`flux-config-pam`), the session module performs the following for
 each admitted session:
 
-- Acquires a per-user lock (``<lock-dir>/uid.$UID.lock``, default
-  ``/run/flux-pam/uid.$UID.lock``) to serialize service verification and
-  scope creation with the prolog and housekeeping scripts, preventing a
-  race between session setup and concurrent job teardown.
-- Verifies that ``user@$UID.service`` is active. An inactive service
-  indicates the prolog did not complete slice setup successfully; the
-  session is denied to prevent uncontained access pending administrator
-  review.
+- Acquires a per-user lock (``/run/flux-pam/uid.$UID.lock``) to serialize
+  with prolog/housekeeping scripts
+- Checks the active marker file (``/run/flux-pam/uid.$UID.active``). The
+  prolog creates this after applying constraints; housekeeping removes it at
+  last-job teardown. Absence of the marker denies the session.
 - Creates a transient systemd scope (``<scope-prefix>-<pid>.scope``,
   default ``flux-pam-<pid>.scope``) under ``user-$UID.slice`` to contain
   the session processes.
@@ -57,9 +54,8 @@ stacks. Add it as a session provider with the ``requisite`` control field::
 
 See EXAMPLES for a complete stack configuration.
 
-Session management depends on the flux-pam prolog and housekeeping scripts
-to manage the ``user@$UID.service`` lifecycle and user slice properties.
-See :man5:`flux-config-pam`.
+Session management requires the flux-pam prolog and housekeeping scripts (see
+:man5:`flux-config-pam`).
 
 OPTIONS
 =======
@@ -99,7 +95,7 @@ Common Options
 debug
   Enable additional logging. For account management, logs successful grants
   at ``LOG_INFO`` level; failures are always logged regardless. For session
-  management, logs scope creation details and service state checks.
+  management, logs scope creation details and marker checks.
 
 EXAMPLES
 ========
@@ -132,9 +128,9 @@ session module and are handled by subsequent modules::
 
 .. note::
    Place ``pam_flux.so`` first in the session stack. With ``requisite``,
-   a slice setup failure denies the session immediately before any other
-   session module runs. Use ``requisite`` rather than ``required`` or
-   ``optional`` to prevent the user from reaching the node without
+   such that slice setup failure denies the session immediately before any
+   other session module runs. Use ``requisite`` rather than ``required``
+   or ``optional`` to prevent the user from accessing the node without
    containment if setup fails.
 
    Session management is only active when ``pam.manage-user-slice = true``
@@ -146,17 +142,23 @@ NOTES
 systemd-user Service
 --------------------
 
-``pam_flux.so`` automatically skips when invoked from the systemd-user PAM
-service (the service systemd uses to start ``user@$UID.service``). This
-prevents a circular dependency: the systemd-user stack runs during the
-startup of ``user@$UID.service``, but ``pam_flux.so`` needs to query and
-interact with that service. The module returns ``PAM_IGNORE`` for both
-account and session functions when ``PAM_SERVICE`` is ``systemd-user``.
+``pam_flux.so`` returns ``PAM_IGNORE`` when ``PAM_SERVICE`` is
+``systemd-user`` (the PAM stack systemd uses to start ``user@$UID.service``).
+This avoids placing the user manager itself in a flux-pam scope.
 
 In practice, ``pam_flux.so`` should not normally appear in
 ``/etc/pam.d/systemd-user`` anyway. However, if your site uses shared PAM
-includes (e.g., ``@include common-account``) that bring ``pam_flux.so`` into
+includes (e.g., ``include common-account``) that bring ``pam_flux.so`` into
 the systemd-user stack, this automatic skip ensures correct behavior.
+
+/proc with hidepid
+------------------
+
+flux-pam tolerates ``hidepid=2`` on ``/proc``, which breaks
+``user@$UID.service`` startup (see PROCFS WITH HIDEPID in
+:man5:`flux-config-pam`). Logins work even when the user manager
+fails. Tradeoff: no ``systemctl --user`` units, user D-Bus, or user
+timers during jobs.
 
 cgroup v2 Requirement
 ---------------------

@@ -23,6 +23,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -403,145 +404,44 @@ static int parse_options (pam_handle_t *pamh,
 }
 
 #ifdef HAVE_LIBSYSTEMD
-/*  Check if user@$UID.service is active and ready for session attachment.
- *  The service is started by the Flux prolog when a job begins and stopped
- *  by housekeeping when the last job ends, so inactive means no active job.
+
+/*  Check the per-user active marker created by the Flux prolog. Its presence,
+ *  read under the user lock, is the single source of truth that the user has
+ *  an active job on the node with containment set up. The prolog creates it
+ *  after applying constraints; housekeeping removes it under the same lock
+ *  when the user's last job ends, so this read cannot race with housekeeping.
  *
- *  Returns  0 if service is active or activating (mirrors systemd's
- *             UNIT_IS_ACTIVE_OR_ACTIVATING macro).
- *  Returns -1 if service is not running or an error occurred with specific
- *             reason set in errmsg
+ *  Returns 0 if the marker is present, -1 otherwise.
  */
-static int check_user_service_active (pam_handle_t *pamh,
-                                      uid_t uid,
-                                      bool debug,
-                                      const char **errmsg)
+static int check_active_marker (pam_handle_t *pamh,
+                                uid_t uid,
+                                const char *lock_dir,
+                                bool debug)
 {
-    sd_bus *bus = NULL;
-    sd_bus_error error = SD_BUS_ERROR_NULL;
-    sd_bus_message *reply = NULL;
-    char unit_name[64];
-    const char *unit_path_raw = NULL;
-    char *unit_path = NULL;
-    char *active_state = NULL;
-    int rc = -1;
+    char path[PATH_MAX];
+    struct stat st;
 
-    *errmsg = "Unable to determine unit state";
-
-    if (snprintf (unit_name,
-                  sizeof (unit_name),
-                  "user@%u.service",
-                  uid) >= sizeof (unit_name)) {
-        pam_syslog (pamh, LOG_ERR, "unit name overflow for uid %u", uid);
+    if (snprintf (path, sizeof (path), "%s/uid.%u.active", lock_dir, uid)
+        >= (int) sizeof (path)) {
+        pam_syslog (pamh, LOG_ERR, "marker path overflow for uid %u", uid);
         return -1;
     }
-
-    /*  Connect to the system bus.
+    /*  lstat so a symlink is not followed; require a regular file.  The
+     *  directory is root-only 0700, so this is defense in depth.
      */
-    if (sd_bus_open_system (&bus) < 0) {
-        pam_syslog (pamh, LOG_ERR, "failed to connect to system bus: %m");
-        return -1;
-    }
-
-    /*  Get the unit object path from systemd.  LoadUnit creates a stub entry
-     *  for units that are not yet loaded, so it always returns a path.
-     */
-    if (sd_bus_call_method (bus,
-                            "org.freedesktop.systemd1",
-                            "/org/freedesktop/systemd1",
-                            "org.freedesktop.systemd1.Manager",
-                            "LoadUnit",
-                            &error,
-                            &reply,
-                            "s",
-                            unit_name) < 0) {
-        pam_syslog (pamh,
-                    LOG_ERR,
-                    "failed to load unit %s: %s",
-                    unit_name,
-                    error.message ? error.message : "unknown error");
-        goto out;
-    }
-
-    if (sd_bus_message_read (reply, "o", &unit_path_raw) < 0) {
-        pam_syslog (pamh, LOG_ERR, "failed to parse LoadUnit response: %m");
-        goto out;
-    }
-
-    /*  unit_path_raw points into the reply message buffer and becomes a
-     *  dangling pointer once the message is unreffed below.  Copy it first.
-     */
-    if (!(unit_path = strdup (unit_path_raw))) {
-        pam_syslog (pamh,
-                    LOG_ERR,
-                    "out of memory copying unit path for %s",
-                    unit_name);
-        goto out;
-    }
-
-    sd_bus_message_unref (reply);
-    reply = NULL;
-    sd_bus_error_free (&error);
-
-    if (debug)
-        pam_syslog (pamh, LOG_INFO,
-                    "checking state of %s at D-Bus path %s",
-                    unit_name,
-                    unit_path);
-
-    /*  Get ActiveState property.
-     */
-    if (sd_bus_get_property_string (bus,
-                                    "org.freedesktop.systemd1",
-                                    unit_path,
-                                    "org.freedesktop.systemd1.Unit",
-                                    "ActiveState",
-                                    &error,
-                                    &active_state) < 0) {
-        pam_syslog (pamh,
-                    LOG_ERR,
-                    "failed to get ActiveState for %s: %s",
-                    unit_name,
-                    error.message ? error.message : "unknown error");
-        goto out;
-    }
-    sd_bus_error_free (&error);
-
-    /* Mirror systemd's own UNIT_IS_ACTIVE_OR_ACTIVATING macro when
-     * checking for an active or activating user@UID service:
-     */
-    if (strcmp (active_state, "active") == 0
-        || strcmp (active_state, "activating") == 0
-        || strcmp (active_state, "reloading") == 0
-        || strcmp (active_state, "refreshing") == 0) {
+    if (lstat (path, &st) < 0) {
         if (debug)
-            pam_syslog (pamh,
-                        LOG_INFO,
-                        "%s is active or activating",
-                        unit_name);
-        rc = 0;
+            pam_syslog (pamh, LOG_INFO, "no active marker for uid %u", uid);
+        return -1;
     }
-    else {
-        /*  inactive/dead is the normal case when no Flux job is running for
-         *  this user (prolog starts the service, housekeeping stops it).
-         *  Always log the observed state so the denial reason is auditable.
-         */
-        pam_syslog (pamh,
-                    LOG_INFO,
-                    "%s not active or activating: ActiveState=%s",
-                    unit_name,
-                    active_state);
-        *errmsg = "unit not active or activating";
-        rc = -1;
+    if (!S_ISREG (st.st_mode)) {
+        pam_syslog (pamh, LOG_ERR,
+                    "active marker for uid %u is not a regular file", uid);
+        return -1;
     }
-
-out:
-    free (unit_path);
-    free (active_state);
-    sd_bus_message_unref (reply);
-    sd_bus_error_free (&error);
-    sd_bus_unref (bus);
-    return rc;
+    if (debug)
+        pam_syslog (pamh, LOG_INFO, "active marker present for uid %u", uid);
+    return 0;
 }
 
 /*  Create a transient scope under user-$UID.slice for the login session.
@@ -899,7 +799,6 @@ pam_sm_open_session (pam_handle_t *pamh,
 #ifdef HAVE_LIBSYSTEMD
     char scope_name[128];
     pid_t pid = getpid ();
-    const char *errmsg = "unknown";
     int lock_fd;
 
     /* Generate scope name
@@ -916,25 +815,23 @@ pam_sm_open_session (pam_handle_t *pamh,
         return PAM_SESSION_ERR;
     }
 
-    /*  Serialize service check + scope creation with prolog/housekeeping to
-     *  prevent a TOCTOU where housekeeping stops the service between our
+    /*  Serialize marker check + scope creation with prolog/housekeeping to
+     *  prevent a TOCTOU where housekeeping removes the marker between our
      *  check and StartTransientUnit.
      */
     if ((lock_fd = user_lock_acquire (pamh, uid, opts.lock_dir)) < 0)
         return PAM_SESSION_ERR;
 
-    /*  Verify user@$UID.service is active before attempting attach.
-     *  The service is started by the Flux prolog and stopped by housekeeping,
-     *  so an inactive service means no active job — deny the login to enforce
-     *  containment.
+    /*  The per-user marker is created by the prolog after containment is
+     *  set up and removed by housekeeping under the same lock held here,
+     *  so its absence authoritatively means no active, contained job for
+     *  this user. Deny to avoid allowing the user unconstrained access
+     *  to the node.
      */
-    if (check_user_service_active (pamh, uid, opts.debug, &errmsg) < 0) {
-        pam_syslog (pamh,
-                    LOG_ERR,
-                    "user %s: user@%u.service: %s. Denying login",
-                    user,
-                    uid,
-                    errmsg);
+    if (check_active_marker (pamh, uid, opts.lock_dir, opts.debug) < 0) {
+        pam_syslog (pamh, LOG_ERR,
+                    "failed session setup for %s: no active job found",
+                    user);
         send_denial_msg (pamh, user, uid);
         user_lock_release (lock_fd);
         return PAM_SESSION_ERR;
