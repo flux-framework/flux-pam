@@ -130,18 +130,22 @@ test_expect_success 're-enable pam.manage-user-slice for remaining tests' '
 	EOT
 '
 # Single job start/end:
-# Prolog should start user@42.service and call set-property
+# Prolog should apply constraints, publish marker, and start user service
 test_expect_success 'submit a test job on rank 0' '
 	jobid=$(submit_as_guest 5m --requires="rank:0" sleep 300) &&
 	echo $jobid > jobid.0 &&
 	flux job wait-event -v $jobid start
 '
-test_expect_success 'jobid.0: prolog started user service and set-properties' '
+test_expect_success 'jobid.0: prolog applied constraints and published marker' '
 	jobid=$(cat jobid.0) &&
 	test_debug "cat systemctl-${jobid}.log" &&
-	grep "start user@42.service" systemctl-${jobid}.log &&
 	grep "set-property --runtime user-42.slice" systemctl-${jobid}.log &&
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active &&
 	test_must_fail grep "stop user@42.service" systemctl-${jobid}.log
+'
+test_expect_success 'jobid.0: prolog started user service (best-effort)' '
+	jobid=$(cat jobid.0) &&
+	grep "start user@42.service" systemctl-${jobid}.log
 '
 
 # MULTICORE-only tests follow:
@@ -149,6 +153,9 @@ test_expect_success MULTICORE 'submit second job on rank 0' '
 	jobid=$(submit_as_guest 5m --requires="rank:0" sleep 300) &&
 	flux job wait-event $jobid start &&
 	echo $jobid > jobid.1
+'
+test_expect_success MULTICORE 'jobid.1: marker still present (concurrent job)' '
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
 '
 test_expect_success MULTICORE 'jobid.1: prolog started user service (idempotent)' '
 	jobid=$(cat jobid.1) &&
@@ -171,7 +178,10 @@ test_expect_success MULTICORE 'jobid.0: housekeeping runs set-property' '
 	grep "set-property .* user-42.slice" systemctl-${jobid}.log &&
 	grep "AllowedCPUs" systemctl-${jobid}.log
 '
-test_expect_success MULTICORE 'jobid.0: but keeps service running' '
+test_expect_success MULTICORE 'jobid.0: marker still present (job remains)' '
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
+'
+test_expect_success MULTICORE 'jobid.0: does not stop service' '
 	test_must_fail grep "stop user@42.service" systemctl-${jobid}.log
 '
 test_expect_success MULTICORE 'jobid.1: cancel second job' '
@@ -181,6 +191,13 @@ test_expect_success MULTICORE 'jobid.1: cancel second job' '
 test_expect_success MULTICORE 'jobid.1: housekeeping stops user service' '
 	jobid=$(cat jobid.1) &&
 	test_wait_until "grep \"stop user@42.service\" systemctl-${jobid}.log"
+'
+test_expect_success MULTICORE 'jobid.1: marker removed (last job)' '
+	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
+'
+test_expect_success MULTICORE 'jobid.1: housekeeping reverted slice constraints' '
+	jobid=$(cat jobid.1) &&
+	grep "revert user-42.slice" systemctl-${jobid}.log
 '
 # MULTICORE-only tests end
 
@@ -208,6 +225,9 @@ test_expect_success 'submit job with kill-user-slice enabled' '
 	flux job wait-event $jobid start &&
 	echo $jobid > jobid.kill
 '
+test_expect_success 'marker present after prolog' '
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
+'
 test_expect_success 'cancel job and verify kill sequence runs' '
 	jobid=$(cat jobid.kill) &&
 	flux cancel $jobid &&
@@ -215,6 +235,13 @@ test_expect_success 'cancel job and verify kill sequence runs' '
 	test_wait_until \
 		"grep \"stop user@42.service\" systemctl-${jobid}.log" &&
 	test_debug "cat systemctl-${jobid}.log"
+'
+test_expect_success 'marker removed after last job housekeeping' '
+	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
+'
+test_expect_success 'housekeeping reverted slice constraints' '
+	jobid=$(cat jobid.kill) &&
+	grep "revert user-42.slice" systemctl-${jobid}.log
 '
 test_expect_success 'housekeeping checks for orphans before killing' '
 	jobid=$(cat jobid.kill) &&
@@ -247,23 +274,25 @@ test_expect_success 'verify default grace time is used' '
 	jobid=$(submit_as_guest 5m --requires="rank:0" sleep 300) &&
 	flux job wait-event $jobid start &&
 	echo $jobid > jobid.default &&
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active &&
 	flux cancel $jobid &&
 	flux job wait-event $jobid clean &&
-	test_wait_until "grep \"stop user@42.service\" systemctl-${jobid}.log"
+	test_wait_until "grep \"stop user@42.service\" systemctl-${jobid}.log" &&
+	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
 '
 
 test_expect_success 'configure mock-systemctl to fail on set-property' '
 	broker_setenv MOCK_SYSTEMCTL_FAIL set-property
 '
-test_expect_success 'prolog fails without rolling back service start' '
+test_expect_success 'prolog fails before service start' '
 	jobid=$(submit_as_guest 5m --requires="rank:0" sleep 300) &&
 	echo $jobid > jobid.no-rollback &&
 	# Job should fail during prolog (set-property fails)
 	test_expect_code 1 flux job wait-event -t 10s $jobid start &&
-	test_debug "cat systemctl-${jobid}.log" &&
-	# Service should have been started but NOT stopped
-	grep "start user@42.service" systemctl-${jobid}.log &&
-	test_must_fail grep "stop user@42.service" systemctl-${jobid}.log
+	# Prolog fails before reaching service start, so marker not created
+	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active &&
+	# No systemctl log created since prolog failed before any systemctl calls
+	test_must_fail test -f systemctl-${jobid}.log
 '
 test_expect_success 'housekeeping cleans up after prolog failure' '
 	jobid=$(cat jobid.no-rollback) &&
@@ -277,6 +306,46 @@ test_expect_success 'restore mock-systemctl for remaining tests' '
 '
 test_expect_success 'undrain all ranks after prolog failure' '
 	flux resource undrain -u 0-3
+'
+
+# Test non-fatal user service start failure (hidepid simulation)
+test_expect_success 'configure mock-systemctl to fail on user service start' '
+	broker_setenv MOCK_SYSTEMCTL_FAIL "start user@"
+'
+test_expect_success 'prolog succeeds despite user service start failure' '
+	jobid=$(submit_as_guest 5m --requires="rank:0" sleep 300) &&
+	flux job wait-event $jobid start &&
+	echo $jobid > jobid.no-service
+'
+test_expect_success 'prolog applied constraints despite service failure' '
+	jobid=$(cat jobid.no-service) &&
+	test_debug "cat systemctl-${jobid}.log" &&
+	grep "set-property --runtime user-42.slice" systemctl-${jobid}.log
+'
+test_expect_success 'marker present despite service start failure' '
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
+'
+test_expect_success 'service start failure was non-fatal, prolog succeeded' '
+	# The prolog completed successfully despite service start failure,
+	# which is verified by the job reaching start state (test 39)
+	# Just verify the job is running
+	jobid=$(cat jobid.no-service) &&
+	flux job eventlog $jobid | grep "submit"
+'
+test_expect_success 'cancel job with failed service' '
+	jobid=$(cat jobid.no-service) &&
+	flux cancel $jobid &&
+	flux job wait-event $jobid clean
+'
+test_expect_success 'housekeeping tolerates service stop failure' '
+	jobid=$(cat jobid.no-service) &&
+	test_wait_until "grep \"stop user@42.service\" systemctl-${jobid}.log"
+'
+test_expect_success 'marker removed after housekeeping' '
+	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
+'
+test_expect_success 'restore mock-systemctl for remaining tests' '
+	broker_unsetenv MOCK_SYSTEMCTL_FAIL
 '
 test_expect_success 'cancel any remaining jobs before concurrent test' '
 	flux cancel --all --user=all &&
@@ -312,6 +381,10 @@ test_expect_success MULTICORE 'submit two jobs concurrently on same rank' '
 	flux job wait-event -vt 20 $jobid1 start &&
 	flux job wait-event -vt 20 $jobid2 start
 '
+test_expect_success MULTICORE 'verify marker created by concurrent prologs' '
+	# Marker should be created once (idempotent under lock)
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
+'
 test_expect_success MULTICORE 'verify both prologs started the service' '
 	# Both prologs always call start; systemctl start is idempotent
 	jobid1=$(cat jobid.concurrent1) &&
@@ -333,7 +406,12 @@ test_expect_success MULTICORE 'cleanup concurrent test jobs' '
 	flux cancel $(cat jobid.concurrent1) &&
 	flux cancel $(cat jobid.concurrent2) &&
 	flux job wait-event -vt 30 $(cat jobid.concurrent1) clean &&
-	flux job wait-event -vt 30 $(cat jobid.concurrent2) clean
+	flux job wait-event -vt 30 $(cat jobid.concurrent2) clean &&
+	# Wait for housekeeping to complete for both jobs
+	test_wait_until "test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active"
+'
+test_expect_success MULTICORE 'marker removed after last concurrent job' '
+	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
 '
 # end MULTICORE tests
 
@@ -347,6 +425,9 @@ test_expect_success 'lock-dir-creation: submit job with no lock dir' '
 '
 test_expect_success 'lock-dir-creation: prolog created lock directory' '
 	test -d ${FLUX_PAM_LOCK_DIR}
+'
+test_expect_success 'lock-dir-creation: marker file present' '
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
 '
 test_expect_success 'lock-dir-creation: directory has correct permissions (0700)' '
 	perms=$(stat -c "%a" ${FLUX_PAM_LOCK_DIR}) &&

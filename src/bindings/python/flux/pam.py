@@ -22,22 +22,8 @@ from flux.job import JobKVSLookup, JobList
 from flux.resource import ResourceSet
 from flux.util import parse_fsd
 
-_debug = False
 
-
-def debug_log(msg):
-    """
-    Log debug message to stderr if FLUX_PAM_SCRIPTS_DEBUG is set or
-    pam.debug is enabled in the Flux configuration.
-
-    Args:
-        msg: Message to log
-    """
-    if _debug or os.environ.get("FLUX_PAM_SCRIPTS_DEBUG"):
-        print(f"flux-pam: {msg}", file=sys.stderr)
-
-
-def acquire_lock(uid, timeout=60, lock_dir=None):
+def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
     """
     Acquire an exclusive lock for the given UID to serialize operations.
 
@@ -47,7 +33,7 @@ def acquire_lock(uid, timeout=60, lock_dir=None):
     Args:
         uid: User ID to lock
         timeout: Maximum seconds to wait for lock (default: 60)
-        lock_dir: Directory for lock files (default: /run/flux-pam)
+        lock_dir: Directory for lock files
 
     Returns:
         File descriptor of the lock file (caller should hold until done)
@@ -56,9 +42,6 @@ def acquire_lock(uid, timeout=60, lock_dir=None):
         OSError: If lock cannot be acquired within timeout
         ValueError: If lock path is a symlink
     """
-    if lock_dir is None:
-        lock_dir = os.environ.get("FLUX_PAM_LOCK_DIR", "/run/flux-pam")
-
     # Create lock directory if it doesn't exist
     os.makedirs(lock_dir, mode=0o700, exist_ok=True)
 
@@ -183,12 +166,31 @@ class PAMHelper:
         self.handle = flux.Flux()
         self.rank = int(self.handle.attr_get("rank"))
 
-        global _debug
-        if self.handle.conf_get("pam.debug", False):
-            _debug = True
+        # Read all configuration upfront
+        self._debug = (
+            self.handle.conf_get("pam.debug", False)
+            or os.environ.get("FLUX_PAM_SCRIPTS_DEBUG") is not None
+        )
+
+        self.manage_user_slice = self.handle.conf_get(
+            "pam.manage-user-slice", False
+        )
+        self.apply_resources = self.handle.conf_get(
+            "exec.sdexec-constrain-resources", False
+        )
+        self.kill_user_slice = self.handle.conf_get(
+            "pam.kill-user-slice", False
+        )
+        self.kill_grace_time = parse_fsd(
+            self.handle.conf_get("pam.kill-slice-grace-time", "30s")
+        )
+
+        # Set up lock directory and paths
+        self._lock_dir = os.environ.get("FLUX_PAM_LOCK_DIR", "/run/flux-pam")
+        self._marker_path = f"{self._lock_dir}/uid.{userid}.active"
 
         # Acquire lock for this user
-        self._lock_fd = acquire_lock(userid)
+        self._lock_fd = acquire_lock(userid, lock_dir=self._lock_dir)
 
     def __enter__(self):
         """Context manager entry."""
@@ -218,21 +220,7 @@ class PAMHelper:
             return True
 
         # Check master switch (default: false, opt-in)
-        enabled = self.handle.conf_get("pam.manage-user-slice", False)
-        return not enabled
-
-    def should_apply_resources(self):
-        """
-        Check if resource constraints should be applied to user slice.
-
-        This is separate from lifecycle management - when false,
-        prolog/housekeeping still manage user@.service start/stop,
-        but don't apply cpuset/memory/device properties to the slice.
-
-        Returns:
-            True if exec.sdexec-constrain-resources is enabled
-        """
-        return self.handle.conf_get("exec.sdexec-constrain-resources", False)
+        return not self.manage_user_slice
 
     def check_linger(self, timeout=30):
         """
@@ -414,7 +402,7 @@ class PAMHelper:
             # In housekeeping script (exclude ending job):
             helper.apply_resource_constraints("housekeeping")
         """
-        if not self.should_apply_resources():
+        if not self.apply_resources:
             self.debug_log(
                 f"{script_type}: skipping resource constraints "
                 "(exec.sdexec-constrain-resources not enabled)"
@@ -443,7 +431,40 @@ class PAMHelper:
 
     def debug_log(self, msg):
         """Log a debug message prefixed with this job's ID."""
-        debug_log(f"{self.jobid}: {msg}")
+        if self._debug:
+            print(f"flux-pam: {self.jobid}: {msg}", file=sys.stderr)
+
+    def set_active_marker(self):
+        """Create the per-user active marker.
+
+        Called by the prolog after constraints are applied, under the user
+        lock. Presence is the single source of truth the session module uses
+        to admit logins. Idempotent. O_NOFOLLOW refuses symlinks.
+        """
+        fd = os.open(
+            self._marker_path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+        )
+        os.close(fd)
+
+    def clear_active_marker(self):
+        """Remove the per-user active marker. Idempotent."""
+        try:
+            os.unlink(self._marker_path)
+        except FileNotFoundError:
+            pass
+
+    def revert_slice(self):
+        """Remove Flux-applied resource-control drop-ins from the user slice.
+
+        set-property --runtime stores a drop-in that persists until reboot or
+        revert. Revert on last-job teardown so this job's constraints do not
+        linger. Reverting a slice with no drop-ins is a no-op.
+        """
+        slice_name = f"user-{self.userid}.slice"
+        try:
+            run_subprocess([self.systemctl, "revert", slice_name])
+        except subprocess.CalledProcessError as e:
+            self.debug_log(f"slice revert non-fatal: {e.stderr.strip()}")
 
     def user_service_start(self):
         """Start systemd user service for this user."""
@@ -488,19 +509,6 @@ class PAMHelper:
                     pass
 
         return orphans
-
-    def _get_kill_grace_time(self):
-        """
-        Get configured grace time for kill operations.
-
-        Returns grace time in seconds from pam.kill-slice-grace-time config.
-        Default is 30 seconds.
-
-        Returns:
-            Float number of seconds
-        """
-        grace_config = self.handle.conf_get("pam.kill-slice-grace-time", "30s")
-        return parse_fsd(grace_config)
 
     def _wait_for_slice_empty(self, timeout):
         """
@@ -549,8 +557,6 @@ class PAMHelper:
         Raises:
             RuntimeError: If processes remain after SIGKILL + grace-time
         """
-        grace_time = self._get_kill_grace_time()
-
         # Check if there are any orphan processes to kill
         orphans = self.check_orphan_processes()
         if not orphans:
@@ -560,15 +566,17 @@ class PAMHelper:
         self.debug_log(
             f"Found {len(orphans)} orphan scope(s), starting cleanup"
         )
-        self.debug_log(f"Using grace time: {grace_time}s")
+        self.debug_log(f"Using grace time: {self.kill_grace_time}s")
 
         # Step 1: Send SIGTERM
         self.debug_log("Sending SIGTERM to slice processes")
         self._kill_slice_processes(signal="SIGTERM")
 
         # Step 2: Wait for grace-time
-        self.debug_log(f"Waiting {grace_time}s for processes to exit")
-        if self._wait_for_slice_empty(grace_time):
+        self.debug_log(
+            f"Waiting {self.kill_grace_time}s for processes to exit"
+        )
+        if self._wait_for_slice_empty(self.kill_grace_time):
             self.debug_log("All processes exited after SIGTERM")
             return
 
@@ -580,8 +588,8 @@ class PAMHelper:
         self._kill_slice_processes(signal="SIGKILL")
 
         # Step 4: Wait for grace-time again
-        self.debug_log(f"Waiting {grace_time}s after SIGKILL")
-        if self._wait_for_slice_empty(grace_time):
+        self.debug_log(f"Waiting {self.kill_grace_time}s after SIGKILL")
+        if self._wait_for_slice_empty(self.kill_grace_time):
             self.debug_log("All processes exited after SIGKILL")
             return
 
@@ -589,44 +597,37 @@ class PAMHelper:
         final_orphans = self.check_orphan_processes()
         msg = (
             f"Processes remain in user-{self.userid}.slice after "
-            f"SIGKILL + {grace_time}s grace time: {', '.join(final_orphans)}"
+            f"SIGKILL + {self.kill_grace_time}s grace time: "
+            f"{', '.join(final_orphans)}"
         )
         raise RuntimeError(msg)
 
-    def user_service_stop(self):
+    def user_slice_teardown(self):
+        """Tear down user slice on the user's last job.
+
+        Clear the active marker first so no new session is admitted,
+        best-effort stop the user manager (it may have failed to start,
+        e.g. due to /proc mounted with hidepid=2), run the configured
+        orphan cleanup, then revert the constraint drop-ins. The empty
+        slice goes dead and is garbage-collected automatically; there is
+        no slice to stop.
         """
-        Stop user service, with optional slice cleanup.
+        self.clear_active_marker()
+        service_name = f"user@{self.userid}.service"
+        try:
+            run_subprocess([self.systemctl, "stop", service_name])
+        except subprocess.CalledProcessError as e:
+            self.debug_log(f"user manager stop non-fatal: {e.stderr.strip()}")
 
-        Behavior depends on pam.kill-user-slice config:
-        - false (default): Just stop user@.service. Cleanup not our
-          responsibility - delegated to other mechanisms.
-        - true: Clean up slice with SIGTERM, grace-time, SIGKILL,
-          grace-time, then drain on failure. Grace time is configurable
-          via pam.kill-slice-grace-time (default: 30s).
-
-        Raises:
-            RuntimeError: If kill-user-slice=true and slice still has
-                processes after full cleanup sequence
-        """
-        kill_slice = self.handle.conf_get("pam.kill-user-slice", False)
-
-        # Always stop the service, even if slice cleanup raises.  Cleanup
-        # failure (orphans survive SIGKILL) and service lifecycle are
-        # independent: a stuck process shouldn't leave user@.service running.
         cleanup_error = None
-        if kill_slice:
+        if self.kill_user_slice:
             self.debug_log("kill-user-slice enabled, cleaning up slice")
             try:
                 self._cleanup_user_slice()
             except RuntimeError as e:
                 cleanup_error = e
-        else:
-            self.debug_log(
-                "kill-user-slice disabled, stopping service without cleanup"
-            )
 
-        service_name = f"user@{self.userid}.service"
-        run_subprocess([self.systemctl, "stop", service_name])
+        self.revert_slice()
 
         if cleanup_error:
             raise cleanup_error

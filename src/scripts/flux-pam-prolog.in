@@ -50,13 +50,13 @@ def main():
         with flux.pam.PAMHelper(
             userid, jobid, systemctl=SYSTEMCTL, loginctl=LOGINCTL
         ) as helper:
-            flux.pam.debug_log(
-                f"prolog {jobid}: rank={helper.rank} uid={userid}"
+            helper.debug_log(
+                f"prolog: rank={helper.rank} uid={userid}"
             )
 
             # Skip if feature disabled or instance owner
             if helper.should_skip():
-                flux.pam.debug_log(f"prolog {jobid}: skipping (disabled or owner)")
+                helper.debug_log("prolog: skipping (disabled or owner)")
                 return 0
 
             # Check if linger is enabled (must be disabled)
@@ -67,7 +67,7 @@ def main():
                         file=sys.stderr,
                     )
                     return 1
-                flux.pam.debug_log(f"prolog {jobid}: linger check passed")
+                helper.debug_log("prolog: linger check passed")
             except (subprocess.TimeoutExpired, ValueError) as e:
                 print(
                     f"flux-pam-prolog[{jobid}]: linger check failed: {e}",
@@ -77,22 +77,14 @@ def main():
 
             # Count other active jobs on this rank for resource constraints
             count = helper.active_local_jobs()
-            flux.pam.debug_log(
-                f"prolog {jobid}: found {count} other active jobs for uid={userid}"
+            helper.debug_log(
+                f"prolog: found {count} other active jobs for uid={userid}"
             )
 
-            # Start user service (idempotent: no-op if already running)
-            flux.pam.debug_log(f"prolog {jobid}: starting user@{userid}.service")
-            try:
-                helper.user_service_start()
-            except Exception as e:
-                print(
-                    f"flux-pam-prolog[{jobid}]: failed to start service: {e}",
-                    file=sys.stderr,
-                )
-                return 1
-
-            # Apply resource constraints (includes current job)
+            # Apply resource constraints to the user slice (includes current
+            # job). set-property stores the drop-in even when the slice is
+            # inactive; it is applied when the first login scope realizes the
+            # slice.
             try:
                 helper.apply_resource_constraints(
                     "prolog", include_current=True
@@ -103,6 +95,32 @@ def main():
                     file=sys.stderr,
                 )
                 return 1
+
+            # Publish the active marker after constraints are in place. Its
+            # presence under the user lock is the single source of truth the
+            # session module uses to admit logins.
+            try:
+                helper.set_active_marker()
+            except Exception as e:
+                print(
+                    f"flux-pam-prolog[{jobid}]: failed to set active marker: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            # Best-effort user manager start. Failure (e.g. hidepid, where
+            # systemd --user cannot read /proc/1/cgroup) is non-fatal: the slice
+            # is realized with the stored constraints when the first login scope
+            # attaches.
+            helper.debug_log(
+                f"prolog: starting user@{userid}.service (best-effort)"
+            )
+            try:
+                helper.user_service_start()
+            except Exception as e:
+                helper.debug_log(
+                    f"prolog: user manager start failed (non-fatal): {e}"
+                )
 
     except Exception as e:
         print(f"flux-pam-prolog[{jobid}]: error: {e}", file=sys.stderr)

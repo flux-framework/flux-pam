@@ -49,34 +49,31 @@ def main():
     # Use PAMHelper to manage systemd resources
     try:
         with flux.pam.PAMHelper(userid, jobid, systemctl=SYSTEMCTL) as helper:
-            flux.pam.debug_log(
-                f"housekeeping {jobid}: rank={helper.rank} uid={userid}"
+            helper.debug_log(
+                f"housekeeping: rank={helper.rank} uid={userid}"
             )
 
             # Skip if feature disabled or instance owner
             if helper.should_skip():
-                flux.pam.debug_log(
-                    f"housekeeping {jobid}: skipping (disabled or owner)"
-                )
+                helper.debug_log("housekeeping: skipping (disabled or owner)")
                 return 0
 
             # Count remaining active jobs on this rank (excluding ending job)
             count = helper.active_local_jobs()
-            flux.pam.debug_log(
-                f"housekeeping {jobid}: {count} jobs remain for uid={userid}"
+            helper.debug_log(
+                f"housekeeping: {count} jobs remain for uid={userid}"
             )
 
-            # If no jobs remain (N→0), stop user service
+            # If no jobs remain (N→0), tear down: clear the marker, best-effort
+            # stop the manager, run configured cleanup, and revert constraints.
             if count == 0:
-                flux.pam.debug_log(
-                    f"housekeeping {jobid}: stopping user@{userid}.service"
+                helper.debug_log(
+                    f"housekeeping: tearing down slice for uid={userid}"
                 )
-                helper.user_service_stop()
+                helper.user_slice_teardown()
             else:
-                # Update slice properties for remaining jobs
-                flux.pam.debug_log(
-                    f"housekeeping {jobid}: updating slice for "
-                    f"{count} remaining jobs"
+                helper.debug_log(
+                    f"housekeeping: updating slice for {count} remaining jobs"
                 )
                 helper.apply_resource_constraints("housekeeping")
 

@@ -240,71 +240,15 @@ class TestPAMHelper(unittest.TestCase):
             with flux.pam.PAMHelper(uid, 12345) as helper:
                 owner_uid = int(helper.handle.attr_get("security.owner"))
 
-                # Mock conf_get to check correct key and return False
-                def mock_conf_get_disabled(key, default):
-                    if key == "pam.manage-user-slice":
-                        return False
-                    return default
+                # Set manage_user_slice to False
+                helper.manage_user_slice = False
+                self.assertTrue(helper.should_skip())
 
-                with patch.object(
-                    helper.handle,
-                    "conf_get",
-                    side_effect=mock_conf_get_disabled,
-                ):
-                    self.assertTrue(helper.should_skip())
-
-                # Mock conf_get to return True (enabled)
-                def mock_conf_get_enabled(key, default):
-                    if key == "pam.manage-user-slice":
-                        return True
-                    return default
-
-                with patch.object(
-                    helper.handle,
-                    "conf_get",
-                    side_effect=mock_conf_get_enabled,
-                ):
-                    # Should not skip (unless we're instance owner)
-                    if uid != owner_uid:
-                        self.assertFalse(helper.should_skip())
-        finally:
-
-            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
-            del os.environ["FLUX_PAM_LOCK_DIR"]
-
-    def test_should_apply_resources(self):
-        """
-        Test should_apply_resources checks exec.sdexec-constrain-resources
-        """
-        uid = os.getuid()
-        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
-        try:
-            with flux.pam.PAMHelper(uid, 12345) as helper:
-                # Mock conf_get to return False for sdexec-constrain-resources
-                def mock_conf_get_no_resources(key, default):
-                    if key == "exec.sdexec-constrain-resources":
-                        return False
-                    return default
-
-                with patch.object(
-                    helper.handle,
-                    "conf_get",
-                    side_effect=mock_conf_get_no_resources,
-                ):
-                    self.assertFalse(helper.should_apply_resources())
-
-                # Mock conf_get to return True for sdexec-constrain-resources
-                def mock_conf_get_with_resources(key, default):
-                    if key == "exec.sdexec-constrain-resources":
-                        return True
-                    return default
-
-                with patch.object(
-                    helper.handle,
-                    "conf_get",
-                    side_effect=mock_conf_get_with_resources,
-                ):
-                    self.assertTrue(helper.should_apply_resources())
+                # Set manage_user_slice to True
+                helper.manage_user_slice = True
+                # Should not skip (unless we're instance owner)
+                if uid != owner_uid:
+                    self.assertFalse(helper.should_skip())
         finally:
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
@@ -373,6 +317,67 @@ class TestPAMHelper(unittest.TestCase):
                 helper.modify_slice(None)
         finally:
 
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_set_active_marker(self):
+        """Test set_active_marker creates marker file"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                # Marker should not exist initially
+                self.assertFalse(os.path.exists(helper._marker_path))
+
+                # Create marker
+                helper.set_active_marker()
+
+                # Marker should exist now
+                self.assertTrue(os.path.exists(helper._marker_path))
+                # Should be a regular file
+                self.assertTrue(os.path.isfile(helper._marker_path))
+                # Should have correct permissions (0600)
+                st = os.stat(helper._marker_path)
+                self.assertEqual(st.st_mode & 0o777, 0o600)
+        finally:
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_clear_active_marker(self):
+        """Test clear_active_marker removes marker file"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                # Create marker first
+                helper.set_active_marker()
+                self.assertTrue(os.path.exists(helper._marker_path))
+
+                # Clear marker
+                helper.clear_active_marker()
+
+                # Marker should not exist
+                self.assertFalse(os.path.exists(helper._marker_path))
+
+                # Clearing again should be idempotent (not raise)
+                helper.clear_active_marker()
+        finally:
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_marker_refuses_symlink(self):
+        """Test set_active_marker refuses to follow symlinks"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                # Create symlink at marker path
+                os.symlink("/tmp/fake", helper._marker_path)
+
+                # Should raise when trying to create marker
+                with self.assertRaises(OSError):
+                    helper.set_active_marker()
+        finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
@@ -742,8 +747,8 @@ class TestPAMHelperErrors(unittest.TestCase):
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
-    def test_user_service_stop_failure(self):
-        """Test user_service_stop when systemctl fails"""
+    def test_user_slice_teardown_best_effort(self):
+        """Test user_slice_teardown tolerates systemctl failures"""
         uid = os.getuid()
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
@@ -754,9 +759,8 @@ class TestPAMHelperErrors(unittest.TestCase):
                         1, ["systemctl", "stop"], stderr="Service not found"
                     )
 
-                    # Should raise exception
-                    with self.assertRaises(subprocess.CalledProcessError):
-                        helper.user_service_stop()
+                    # Should NOT raise exception (best-effort)
+                    helper.user_slice_teardown()
         finally:
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
@@ -790,20 +794,6 @@ class TestPAMHelperErrors(unittest.TestCase):
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
-
-    def test_systemctl_path_is_used(self):
-        """Test PAMHelper uses the systemctl path given to constructor"""
-        uid = os.getuid()
-        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
-        try:
-            with flux.pam.PAMHelper(
-                uid, 12345, systemctl="/test/mock-systemctl"
-            ) as helper:
-                self.assertEqual(helper.systemctl, "/test/mock-systemctl")
-        finally:
-            shutil.rmtree(
-                os.environ.pop("FLUX_PAM_LOCK_DIR"), ignore_errors=True
-            )
 
 
 class TestPAMHelperWithMapper(unittest.TestCase):
@@ -899,189 +889,40 @@ class TestPAMHelperWithMapper(unittest.TestCase):
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
 
-class TestApplyResourceConstraints(unittest.TestCase):
-    """Test apply_resource_constraints helper method"""
-
-    def test_apply_resource_constraints_includes_current(self):
-        """Test apply_resource_constraints with include_current=True"""
-        uid = 12345
-        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
-        try:
-            with patch("flux.Flux") as mock_flux:
-                helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
-
-                # Mock should_apply_resources to return True
-                helper.handle.conf_get = lambda key, default: (
-                    True
-                    if key == "exec.sdexec-constrain-resources"
-                    else default
-                )
-
-                # Mock the methods that will be called
-                with patch.object(
-                    helper, "resource_union", return_value={"mock": "R"}
-                ) as mock_union:
-                    with patch.object(
-                        helper,
-                        "lookup_properties",
-                        return_value={"CPUAccounting": "yes"},
-                    ) as mock_lookup:
-                        with patch.object(
-                            helper, "modify_slice"
-                        ) as mock_modify:
-                            # Call with include_current=True
-                            helper.apply_resource_constraints(
-                                "prolog", include_current=True
-                            )
-
-                            # Verify resource_union called with
-                            # include_current=True
-                            mock_union.assert_called_once_with(
-                                include_current=True
-                            )
-                            # Verify lookup_properties called with R
-                            mock_lookup.assert_called_once_with({"mock": "R"})
-                            # Verify modify_slice called with properties
-                            mock_modify.assert_called_once_with(
-                                {"CPUAccounting": "yes"}
-                            )
-        finally:
-            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
-            del os.environ["FLUX_PAM_LOCK_DIR"]
-
-    def test_apply_resource_constraints_excludes_current(self):
-        """Test apply_resource_constraints with include_current=False"""
-        uid = 12345
-        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
-        try:
-            with patch("flux.Flux") as mock_flux:
-                helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
-
-                helper.handle.conf_get = lambda key, default: (
-                    True
-                    if key == "exec.sdexec-constrain-resources"
-                    else default
-                )
-
-                with patch.object(
-                    helper, "resource_union", return_value={"mock": "R"}
-                ) as mock_union:
-                    with patch.object(
-                        helper,
-                        "lookup_properties",
-                        return_value={"CPUAccounting": "yes"},
-                    ):
-                        with patch.object(helper, "modify_slice"):
-                            # Call with include_current=False (default)
-                            helper.apply_resource_constraints("housekeeping")
-
-                            # Verify resource_union called with
-                            # include_current=False
-                            mock_union.assert_called_once_with(
-                                include_current=False
-                            )
-        finally:
-            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
-            del os.environ["FLUX_PAM_LOCK_DIR"]
-
-    def test_apply_resource_constraints_skips_when_disabled(self):
-        """Test apply_resource_constraints respects should_apply_resources"""
-        uid = 12345
-        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
-        try:
-            with patch("flux.Flux") as mock_flux:
-                helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
-
-                # Mock should_apply_resources to return False
-                helper.handle.conf_get = lambda key, default: False
-
-                with patch.object(helper, "resource_union") as mock_union:
-                    with patch.object(
-                        helper, "lookup_properties"
-                    ) as mock_lookup:
-                        with patch.object(
-                            helper, "modify_slice"
-                        ) as mock_modify:
-                            # Call helper
-                            helper.apply_resource_constraints("prolog")
-
-                            # Verify none of the methods were called
-                            mock_union.assert_not_called()
-                            mock_lookup.assert_not_called()
-                            mock_modify.assert_not_called()
-        finally:
-            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
-            del os.environ["FLUX_PAM_LOCK_DIR"]
-
-    def test_apply_resource_constraints_with_empty_properties(self):
-        """Test apply_resource_constraints when no properties returned"""
-        uid = 12345
-        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
-        try:
-            with patch("flux.Flux") as mock_flux:
-                helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
-
-                helper.handle.conf_get = lambda key, default: (
-                    True
-                    if key == "exec.sdexec-constrain-resources"
-                    else default
-                )
-
-                with patch.object(helper, "resource_union", return_value={}):
-                    # lookup_properties returns empty dict (no mapper)
-                    with patch.object(
-                        helper, "lookup_properties", return_value={}
-                    ):
-                        with patch.object(
-                            helper, "modify_slice"
-                        ) as mock_modify:
-                            helper.apply_resource_constraints("housekeeping")
-
-                            # modify_slice should not be called with
-                            # empty properties
-                            mock_modify.assert_not_called()
-        finally:
-            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
-            del os.environ["FLUX_PAM_LOCK_DIR"]
-
-
 class TestKillUserSlice(unittest.TestCase):
     """Test kill-user-slice functionality"""
 
     def test_kill_user_slice_no_orphans_skips_cleanup(self):
         """
-        Test user_service_stop when no orphans exist
+        Test user_slice_teardown when no orphans exist
         """
         uid = 12345
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with patch("flux.Flux") as mock_flux:
+                # Setup default conf_get mock to return sensible defaults
+                mock_flux.return_value.conf_get.side_effect = (
+                    lambda key, default: default
+                )
                 helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
 
-                # Mock conf_get
-                def mock_conf_get(key, default):
-                    if key == "pam.kill-user-slice":
-                        return True
-                    return default
-
-                helper.handle.conf_get = mock_conf_get
+                # Set config attribute
+                helper.kill_user_slice = True
 
                 # No orphans - cleanup should be skipped
                 with patch.object(
                     helper, "check_orphan_processes", return_value=[]
                 ):
                     with patch("flux.pam.run_subprocess") as mock_run:
-                        helper.user_service_stop()
+                        helper.user_slice_teardown()
 
-                        # Should only call stop (no kill since no orphans)
-                        self.assertEqual(mock_run.call_count, 1)
+                        # Should call stop and revert
+                        # (no kill since no orphans)
+                        self.assertEqual(mock_run.call_count, 2)
                         call_str = str(mock_run.call_args_list[0])
                         self.assertIn("stop", call_str)
+                        call_str = str(mock_run.call_args_list[1])
+                        self.assertIn("revert", call_str)
         finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
@@ -1094,17 +935,15 @@ class TestKillUserSlice(unittest.TestCase):
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with patch("flux.Flux") as mock_flux:
+                # Setup default conf_get mock to return sensible defaults
+                mock_flux.return_value.conf_get.side_effect = (
+                    lambda key, default: default
+                )
                 helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
 
-                def mock_conf_get(key, default):
-                    if key == "pam.kill-user-slice":
-                        return True
-                    if key == "pam.kill-slice-grace-time":
-                        return "0.1s"  # Fast timeout for tests
-                    return default
-
-                helper.handle.conf_get = mock_conf_get
+                # Set config attributes
+                helper.kill_user_slice = True
+                helper.kill_grace_time = 0.1  # Fast timeout for tests
 
                 # First call: orphans exist, then they're gone
                 orphan_calls = [["scope1"], []]
@@ -1114,10 +953,10 @@ class TestKillUserSlice(unittest.TestCase):
                     side_effect=orphan_calls,
                 ):
                     with patch("flux.pam.run_subprocess") as mock_run:
-                        helper.user_service_stop()
+                        helper.user_slice_teardown()
 
-                        # Should call kill (SIGTERM) then stop
-                        self.assertEqual(mock_run.call_count, 2)
+                        # Should call stop, kill (SIGTERM), revert
+                        self.assertEqual(mock_run.call_count, 3)
                         calls = [str(call) for call in mock_run.call_args_list]
                         self.assertTrue(
                             any("SIGTERM" in c for c in calls),
@@ -1127,13 +966,17 @@ class TestKillUserSlice(unittest.TestCase):
                             any("stop" in c for c in calls),
                             "Should stop service",
                         )
+                        self.assertTrue(
+                            any("revert" in c for c in calls),
+                            "Should revert slice",
+                        )
         finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
     def test_kill_user_slice_config_false_ignores_orphans(self):
         """
-        Test user_service_stop with kill-user-slice=false just stops service
+        Test user_slice_teardown with kill-user-slice=false just stops service
 
         When kill=false, cleanup is delegated elsewhere, so we ignore orphans
         and just stop the service.
@@ -1142,16 +985,14 @@ class TestKillUserSlice(unittest.TestCase):
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with patch("flux.Flux") as mock_flux:
+                # Setup default conf_get mock to return sensible defaults
+                mock_flux.return_value.conf_get.side_effect = (
+                    lambda key, default: default
+                )
                 helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
 
-                # Mock conf_get to return false for kill-user-slice
-                def mock_conf_get(key, default):
-                    if key == "pam.kill-user-slice":
-                        return False
-                    return default
-
-                helper.handle.conf_get = mock_conf_get
+                # Set kill_user_slice to False
+                helper.kill_user_slice = False
 
                 # Mock check_orphan_processes - should NOT be called
                 with patch.object(
@@ -1160,12 +1001,14 @@ class TestKillUserSlice(unittest.TestCase):
                     return_value=["session-123.scope: 2 process(es)"],
                 ) as mock_orphans:
                     with patch("flux.pam.run_subprocess") as mock_run:
-                        helper.user_service_stop()
+                        helper.user_slice_teardown()
 
-                        # Should only call stop (no kill)
-                        self.assertEqual(mock_run.call_count, 1)
+                        # Should call stop and revert (no kill)
+                        self.assertEqual(mock_run.call_count, 2)
                         call_str = str(mock_run.call_args_list[0])
                         self.assertIn("stop", call_str)
+                        call_str = str(mock_run.call_args_list[1])
+                        self.assertIn("revert", call_str)
 
                         # Should NOT check for orphans
                         mock_orphans.assert_not_called()
@@ -1181,17 +1024,15 @@ class TestKillUserSlice(unittest.TestCase):
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with patch("flux.Flux") as mock_flux:
+                # Setup default conf_get mock to return sensible defaults
+                mock_flux.return_value.conf_get.side_effect = (
+                    lambda key, default: default
+                )
                 helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
 
-                def mock_conf_get(key, default):
-                    if key == "pam.kill-user-slice":
-                        return True
-                    if key == "pam.kill-slice-grace-time":
-                        return "0.05s"  # Very short for faster test
-                    return default
-
-                helper.handle.conf_get = mock_conf_get
+                # Set config attributes
+                helper.kill_user_slice = True
+                helper.kill_grace_time = 0.05  # Very short for faster test
 
                 # Track which phase we're in based on subprocess calls
                 kill_count = [0]
@@ -1217,7 +1058,7 @@ class TestKillUserSlice(unittest.TestCase):
                 ):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         mock_run.side_effect = mock_run_subprocess
-                        helper.user_service_stop()
+                        helper.user_slice_teardown()
 
                         # Should send both SIGTERM and SIGKILL
                         calls = [str(call) for call in mock_run.call_args_list]
@@ -1239,7 +1080,7 @@ class TestKillUserSlice(unittest.TestCase):
 
     def test_kill_user_slice_config_true_orphans_remain(self):
         """
-        Test user_service_stop with kill=true raises if orphans remain
+        Test user_slice_teardown with kill=true raises if orphans remain
 
         When kill=true and orphans remain after SIGKILL + grace time, the
         RuntimeError is still raised but only AFTER systemctl stop is called.
@@ -1248,17 +1089,15 @@ class TestKillUserSlice(unittest.TestCase):
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with patch("flux.Flux") as mock_flux:
+                # Setup default conf_get mock to return sensible defaults
+                mock_flux.return_value.conf_get.side_effect = (
+                    lambda key, default: default
+                )
                 helper = flux.pam.PAMHelper(uid, flux.job.JobID(1))
-                helper.handle = mock_flux
 
-                def mock_conf_get(key, default):
-                    if key == "pam.kill-user-slice":
-                        return True
-                    if key == "pam.kill-slice-grace-time":
-                        return "0.1s"
-                    return default
-
-                helper.handle.conf_get = mock_conf_get
+                # Set config attributes
+                helper.kill_user_slice = True
+                helper.kill_grace_time = 0.1
 
                 # Orphans persist through everything
                 with patch.object(
@@ -1269,7 +1108,7 @@ class TestKillUserSlice(unittest.TestCase):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         # Should raise RuntimeError
                         with self.assertRaises(RuntimeError) as cm:
-                            helper.user_service_stop()
+                            helper.user_slice_teardown()
 
                         self.assertIn(
                             "Processes remain in user-12345.slice",

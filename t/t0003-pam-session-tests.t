@@ -75,6 +75,9 @@ TEST_UID=$(id -u ${TEST_USER})
 # FAKE_USERID required for submit_as_guest()
 FAKE_USERID=${TEST_UID}
 
+# Use test trash directory for lock files (matches PAM stack lock-dir)
+export FLUX_PAM_LOCK_DIR=$(pwd)
+
 # Acquire lock for this user's systemd service
 test_systemd_user_lock ${TEST_UID}
 
@@ -128,12 +131,8 @@ test_expect_success 'get service state for test user' '
 test_expect_success 'slice-state: stop any existing service for test user' '
 	sudo systemctl stop user@${TEST_UID}.service || :
 '
-test_expect_success 'slice-state: verify test service is not running' '
-	test_must_fail sudo systemctl is-active user@${TEST_UID}.service
-'
-test_expect_success 'slice-state: start user@.service for test' '
-	sudo systemctl start user@${TEST_UID}.service &&
-	sudo systemctl is-active user@${TEST_UID}.service
+test_expect_success 'slice-state: remove any existing marker' '
+	sudo rm -f ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
 test_expect_success 'slice-state: clean up any scopes from previous tests' '
 	reset_test_scopes
@@ -142,25 +141,28 @@ test_expect_success 'slice-state: submit test job' '
 	jobid=$(submit_as_guest 5m sleep 300) &&
 	flux job wait-event -vt 20 $jobid start
 '
-test_expect_success 'slice-state: session attach succeeds with active service' '
+test_expect_success 'slice-state: manually create marker (prolog not configured)' '
+	sudo touch ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active &&
+	test -f ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
+'
+test_expect_success 'slice-state: session attach succeeds with marker present' '
 	pamtest_session -u ${TEST_USER}
 '
-test_expect_success 'slice-state: stop user@.service' '
-	sudo systemctl stop user@${TEST_UID}.service &&
-	test_must_fail sudo systemctl is-active user@${TEST_UID}.service
+test_expect_success 'slice-state: remove marker to simulate teardown' '
+	sudo rm -f ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
-test_expect_success 'slice-state: session attach fails with inactive service' '
+test_expect_success 'slice-state: session attach fails without marker' '
 	test_must_fail pamtest_session -u ${TEST_USER}
 '
 test_expect_success 'slice-state: cancel running job' '
 	flux cancel $jobid &&
 	flux job wait-event -vt 20 $jobid clean
 '
-test_expect_success 'scope-create: start user@.service for test' '
-	sudo systemctl start user@${TEST_UID}.service &&
-	sudo systemctl is-active user@${TEST_UID}.service
+test_expect_success 'scope-create: create marker for test' '
+	sudo mkdir -p ${FLUX_PAM_LOCK_DIR} &&
+	sudo touch ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
-test_expect_success 'scope-creat: clean up any scopes from previous tests' '
+test_expect_success 'scope-create: clean up any scopes from previous tests' '
 	reset_test_scopes
 '
 test_expect_success 'scope-create: submit test job' '
@@ -212,9 +214,8 @@ test_expect_success 'lock-dir-perms: submit test job' '
 	jobid=$(submit_as_guest 5m sleep 300) &&
 	flux job wait-event $jobid start
 '
-test_expect_success 'lock-dir-perms: start user service' '
-	sudo systemctl start user@${TEST_UID}.service &&
-	sudo systemctl is-active user@${TEST_UID}.service
+test_expect_success 'lock-dir-perms: create marker' '
+	sudo touch ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
 test_expect_success 'lock-dir-perms: session fails with group-writable dir' '
 	test_must_fail \
@@ -252,9 +253,8 @@ test_expect_success 'lock-dir-perms: submit another test job' '
 	jobid=$(submit_as_guest 5m sleep 300) &&
 	flux job wait-event $jobid start
 '
-test_expect_success 'lock-dir-perms: restart user service' '
-	sudo systemctl start user@${TEST_UID}.service &&
-	sudo systemctl is-active user@${TEST_UID}.service
+test_expect_success 'lock-dir-perms: recreate marker' '
+	sudo touch ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
 test_expect_success 'lock-dir-perms: session fails with other-writable dir' '
 	test_must_fail \
@@ -307,9 +307,10 @@ test_expect_success 'systemd-user: cancel test job' '
 test_expect_success 'cleanup test scopes' '
 	reset_test_scopes
 '
-test_expect_success 'reset state of test user manager' '
+test_expect_success 'reset state of test user manager and marker' '
 	if test "${SERVICE_STATE}" = "inactive"; then
 		sudo systemctl stop user@${TEST_UID}.service
-	fi
+	fi &&
+	sudo rm -f ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
 test_done
