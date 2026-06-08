@@ -10,8 +10,8 @@ The ``pam`` table configures flux-pam features that manage systemd user
 slices for Flux job users. This includes:
 
 - The flux-pam prolog and housekeeping scripts, which run during job prolog
-  and housekeeping phases to start/stop user services and optionally apply
-  resource constraints to user slices.
+  and housekeeping phases to manage slice constraints and a per-user active
+  marker, and best-effort attempt to start ``user@$UID.service``.
 - The ``pam_flux.so`` PAM session module, which attaches login sessions
   authenticated via the account module to the user's managed slice when
   ``manage-user-slice`` is enabled. See :man8:`pam_flux`.
@@ -25,14 +25,15 @@ hierarchy. Resource constraints (``AllowedCPUs``, ``AllowedMemoryNodes``,
 ``systemctl set-property --runtime``, which is only enforced by systemd on
 the unified hierarchy. cgroup v1 systems are not supported.
 
-When ``pam.manage-user-slice`` is enabled, Flux takes ownership of the
-``user@UID.service`` manager for job users — starting it at first job and
-stopping it after the last. **systemd linger must not be enabled for job
-users on compute nodes.** Linger (``loginctl enable-linger``) keeps
-``user@UID.service`` running independently of jobs, which interferes with
-Flux's lifecycle management in ways that can cause login sessions to escape
-containment silently. The prolog will fail hard if it detects linger is
-enabled for a job user, rather than proceeding with an inconsistent state.
+When ``pam.manage-user-slice`` is enabled, **systemd linger must not be
+enabled for job users on compute nodes.** Linger (``loginctl enable-linger``)
+keeps ``user@UID.service`` running independently of jobs, bypassing Flux
+control. The prolog fails immediately if linger is detected.
+
+The prolog applies resource constraints to the user slice, creates an
+active marker file, and best-effort starts ``user@$UID.service`` (for
+background, see PROCFS WITH HIDEPID below). The PAM session module checks
+the marker under lock before admitting logins.
 
 The flux-pam package installs ``flux-pam-prolog`` and
 ``flux-pam-housekeeping`` into ``$libexecdir/flux/prolog.d/`` and
@@ -81,22 +82,22 @@ KEYS
 All keys are optional and default to ``false`` unless otherwise noted.
 
 manage-user-slice
-   Boolean value that enables systemd user slice lifecycle
-   management via prolog and housekeeping scripts. When enabled, the
-   prolog starts ``user@UID.service`` (if not already running) for each
-   job user, and housekeeping stops it when the user's last job completes.
+   Boolean value that enables systemd user slice management via prolog and
+   housekeeping scripts. When enabled, the prolog applies slice constraints,
+   publishes the active marker, and best-effort starts ``user@$UID.service``;
+   housekeeping reverts and clears the marker when the last job completes.
    This is the master switch for all user slice management features,
    including session attachment in ``pam_flux.so`` (see :man8:`pam_flux`).
    (Default: ``false``).
 
    When this feature is disabled, prolog and housekeeping scripts exit
-   early without managing user services or applying resource constraints.
-   This includes the instance owner (who always skips management).
+   early without managing user slices or markers. This includes the
+   instance owner (who always skips management).
 
 kill-user-slice
    Boolean value that controls whether housekeeping actively terminates
-   processes remaining in the user slice when stopping
-   ``user@UID.service``. (Default: ``false``).
+   processes remaining in the user slice during last-job slice teardown.
+   (Default: ``false``).
 
    When set to ``true``, housekeeping implements aggressive cleanup:
 
@@ -109,7 +110,7 @@ kill-user-slice
    - Waits for ``kill-slice-grace-time`` again
    - If processes still remain, raises an error and drains the node
 
-   When set to ``false`` (the default), housekeeping stops
+   When set to ``false`` (the default), housekeeping best-effort stops
    ``user@UID.service`` without attempting to kill processes. Cleanup is
    delegated to other mechanisms such as site-specific tools.
 
@@ -155,7 +156,7 @@ exec.sdexec-constrain-resources
      explicitly allowed
 
    When ``exec.sdexec-constrain-resources`` is disabled, prolog/housekeeping
-   still manage the user service lifecycle (start/stop) if
+   still manage the active marker and best-effort start/stop the user manager if
    ``pam.manage-user-slice`` is enabled, but do not apply resource constraints.
 
    See :core:man5:`flux-config-exec` for details on the ``exec`` configuration.
@@ -175,17 +176,22 @@ Prolog scripts run at job start and perform the following actions (when
 2. Check that linger is not enabled for the user (fail hard if it is — see
    PREREQUISITES)
 3. Count active jobs on the node for this user (excluding the starting job)
-4. Start ``user@UID.service`` (idempotent: no-op if already running due to
-   a concurrent prolog for the same user)
-5. If ``exec.sdexec-constrain-resources`` is enabled:
+4. If ``exec.sdexec-constrain-resources`` is enabled:
 
    - Compute the union of resources from all active jobs (including the
      starting job)
    - Query ``sdexec-mapper`` for systemd properties corresponding to the
      resource union
-   - Apply properties to ``user-UID.slice`` via ``systemctl set-property``
+   - Apply properties to ``user-UID.slice`` via ``systemctl set-property
+     --runtime`` (stored even when the slice is inactive; applied when the
+     first scope realizes the slice)
 
-6. Release the lock
+5. Create the per-user active marker file (``/run/flux-pam/uid.$UID.active``)
+6. Best-effort start ``user@UID.service`` (see PROCFS WITH HIDEPID)
+7. Release the lock
+
+The slice itself is automatically realized by systemd  when the first login
+session scope attaches.
 
 Housekeeping Scripts
 --------------------
@@ -200,11 +206,16 @@ actions (when ``pam.manage-user-slice`` is enabled):
    enabled, recalculate and apply resource constraints for the remaining jobs
 4. If no jobs remain (count = 0):
 
+   - Clear the active marker (no new session will be admitted)
+   - Best-effort stop ``user@UID.service`` (failure logged and ignored)
    - If ``pam.kill-user-slice`` is ``true``, perform cleanup sequence
      (see ``kill-user-slice`` above)
-   - Stop ``user@UID.service``
+   - Revert the slice constraint drop-ins (``systemctl revert user-UID.slice``)
 
 5. Release the lock
+
+The empty slice goes dead and is garbage-collected automatically; there is no
+need to explicitly stop the slice.
 
 
 LOCKING AND SERIALIZATION
@@ -215,8 +226,10 @@ on ``/run/flux-pam/uid.UID.lock`` to serialize operations for each user.
 This prevents race conditions when multiple jobs for the same user start
 or complete concurrently on the same node.
 
-The lock is held for the entire duration of prolog/housekeeping execution
-and released automatically when the script exits.
+The lock is held for the entire duration of prolog/housekeeping execution.
+The active marker file is created and removed under this lock, and the PAM
+session module reads it under lock, making session admission linearizable with
+teardown.
 
 The lock directory (``/run/flux-pam`` by default) must have permissions
 ``0700`` (owner read/write/execute only) and be owned by root. Lock files
@@ -226,6 +239,39 @@ operation). If the lock directory has group or other write permissions, both
 the prolog/housekeeping scripts and the PAM session module will refuse to
 proceed and log an error. The directory is created with correct permissions
 at boot by the flux-pam tmpfiles.d drop-in (``/usr/lib/tmpfiles.d/flux-pam.conf``).
+
+
+PROCFS WITH HIDEPID
+===================
+
+The ``hidepid=2`` mount option for ``/proc`` hides other users' processes.
+This breaks ``systemd --user`` startup: the user manager must read
+``/proc/1/cgroup`` to determine the cgroup root, but ``hidepid=2`` hides PID 1
+from unprivileged users (systemd/systemd#12955). Red Hat documents ``hidepid``
+as incompatible with the systemd user manager.
+
+**flux-pam tolerates this.** The prolog makes service start best-effort (failure
+is non-fatal). Containment depends on the slice, not the service: constraints
+are applied with ``systemctl set-property --runtime`` (stored for inactive
+slices) and enforced when the PAM module attaches the login scope. Logins work
+even when ``user@$UID.service`` fails. Repeated service start failures in the
+journal are expected and benign.
+
+**Tradeoff:** No ``systemd --user`` instance means no ``systemctl --user``
+units, user D-Bus, or user timers during jobs. This is normally acceptable on
+batch compute nodes.
+
+**Workaround (weakens hidepid):** To enable the user manager on ``hidepid=2``
+nodes, add the ``gid=`` whitelisted group to ``user@.service``::
+
+   # /etc/systemd/system/user@.service.d/hidepid.conf
+   [Service]
+   SupplementaryGroups=GROUP
+
+Then ``systemctl daemon-reload``. This allows ``systemd --user`` to read
+``/proc/1/cgroup``, but processes started via ``systemctl --user`` inherit the
+group and can see all PIDs. Flux job processes are unaffected (run in separate
+cgroup hierarchy).
 
 
 SECURITY CONSIDERATIONS
@@ -250,9 +296,9 @@ Orphan Processes
 ----------------
 
 With ``kill-user-slice = false`` (the default), processes that outlive a
-user's jobs may remain in the user slice even after ``user@UID.service``
-stops. These processes may retain access to resources that were allocated
-to previous jobs. Sites concerned about this should either:
+user's jobs may remain in the user slice even after the slice is torn down at
+the last job's completion. These processes may retain access to resources that
+were allocated to previous jobs. Sites concerned about this should either:
 
 - Enable ``kill-user-slice`` to forcibly terminate orphans
 - Configure systemd's ``KillMode`` for user slices to handle cleanup
