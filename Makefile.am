@@ -1,6 +1,7 @@
 ACLOCAL_AMFLAGS = -I config
 
 EXTRA_DIST = \
+	LICENSE \
 	NEWS.md \
 	README.md \
 	NOTICE.LLNS \
