@@ -44,6 +44,15 @@ each admitted session:
 - Sets ``XDG_RUNTIME_DIR`` and ``DBUS_SESSION_BUS_ADDRESS`` in the
   session environment.
 
+The session module does not read ``exec.sdexec-constrain-resources``; it
+places the session in ``user-$UID.slice`` regardless of whether resource
+constraints are configured. When ``exec.sdexec-constrain-resources`` is
+disabled, the slice carries no resource limits, so the session is contained
+in the user's slice but is not restricted to the resources allocated to the
+user's jobs. When it is enabled, the prolog applies resource limits to the
+slice and the session inherits them. See BEHAVIOR in
+:man5:`flux-config-pam`.
+
 The session module only activates for users granted access by the
 ``pam_flux.so`` account module; users admitted by other account modules
 receive ``PAM_IGNORE`` and their sessions run in the default cgroup.

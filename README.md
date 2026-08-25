@@ -22,8 +22,9 @@ resource constraints as the job.
 
 **Prolog and housekeeping scripts** — `flux-pam-prolog` and
 `flux-pam-housekeeping` run on each compute node at job start and
-completion. The prolog applies resource constraints to the user slice,
-creates an active marker file, and best-effort starts `user@UID.service`.
+completion. The prolog creates an active marker file, best-effort starts
+`user@UID.service`, and, when `exec.sdexec-constrain-resources` is enabled,
+applies resource constraints to the user slice.
 Housekeeping updates constraints as jobs end and clears the marker when
 the user's last job completes. The PAM session module checks for the
 marker's presence under lock before admitting logins, ensuring
@@ -100,6 +101,15 @@ sessions cannot attach before containment is ready or after it has been
 torn down. Session management requires `pam.manage-user-slice = true` in
 the Flux system configuration and the prolog/housekeeping scripts to be
 active (see below).
+
+Resource constraints (`exec.sdexec-constrain-resources`) are optional.
+With `pam.manage-user-slice = true` but constraints disabled, sessions are
+still placed in the user's slice and gated on the active marker, but the
+slice carries no CPU, memory, or device limits — appropriate for
+node-exclusive systems. The same PAM stack works in both cases; only the
+Flux configuration differs. See
+[flux-config-pam(5)](doc/man5/flux-config-pam.rst) for the full behavior
+breakdown.
 
 ```
 # /etc/pam.d/sshd (or equivalent)

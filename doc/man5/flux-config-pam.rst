@@ -16,6 +16,44 @@ slices for Flux job users. This includes:
   authenticated via the account module to the user's managed slice when
   ``manage-user-slice`` is enabled. See :man8:`pam_flux`.
 
+BEHAVIOR
+========
+
+When ``pam_flux.so`` is configured in the session stack, it operates in one
+of three modes, selected by Flux configuration. The same PAM stack can
+therefore be deployed on both node-exclusive and node-sharing systems, with
+correct behavior from the session module on each.
+
+Two configuration keys select the mode:
+
+Access control only
+   (``pam.manage-user-slice = false``, the default.) The account module
+   admits only users with an active job on the node (see :man8:`pam_flux`).
+   The session module takes no action: it returns success without creating
+   a slice or scope, so login sessions run in the calling service's cgroup
+   (for example, that of :linux:man8:`sshd`). The prolog and housekeeping
+   scripts exit early, so slice teardown and orphan cleanup
+   (``kill-user-slice``) do not apply. No systemd integration is required.
+
+Slice management without resource constraints
+   (``pam.manage-user-slice = true``, ``exec.sdexec-constrain-resources =
+   false``.) The session module admits a login only while the user has an
+   active job on the node, and places each session in a transient scope
+   under ``user-UID.slice``. The slice carries no resource limits, so
+   sessions share the user's slice but are not restricted to the CPUs,
+   memory, or devices allocated to the user's jobs. Orphan cleanup
+   (``kill-user-slice``) still applies. This mode is appropriate on
+   node-exclusive systems, where per-job resource partitioning within a
+   node is unnecessary.
+
+Slice management with resource constraints
+   (``pam.manage-user-slice = true``, ``exec.sdexec-constrain-resources =
+   true``.) As above, but the slice is restricted to the union of CPUs,
+   memory, and devices allocated to the user's jobs (see RESOURCE
+   CONSTRAINTS). Sessions placed in the slice are confined to those
+   resources. This mode is appropriate on node-sharing systems, where
+   multiple users or jobs may run on the same node concurrently.
+
 PREREQUISITES
 =============
 
@@ -158,6 +196,8 @@ exec.sdexec-constrain-resources
    When ``exec.sdexec-constrain-resources`` is disabled, prolog/housekeeping
    still manage the active marker and best-effort start/stop the user manager if
    ``pam.manage-user-slice`` is enabled, but do not apply resource constraints.
+   Login sessions are then placed in the user slice without resource limits
+   (see BEHAVIOR).
 
    See :core:man5:`flux-config-exec` for details on the ``exec`` configuration.
 

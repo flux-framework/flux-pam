@@ -18,8 +18,9 @@ into a transient systemd scope under the user's managed slice, ensuring SSH
 sessions share the same resource constraints as the job.
 
 **Prolog and housekeeping scripts** — Run on each compute node at job start
-and completion to manage the ``user@UID.service`` lifecycle and apply CPU,
-memory, and device limits to the user's systemd slice.
+and completion to manage the ``user@UID.service`` lifecycle and, when
+``exec.sdexec-constrain-resources`` is enabled, apply CPU, memory, and device
+limits to the user's systemd slice.
 
 Key Features
 ------------
