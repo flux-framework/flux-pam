@@ -135,6 +135,8 @@ manage-user-slice
 kill-user-slice
    Boolean value that controls whether housekeeping actively terminates
    processes remaining in the user slice during last-job slice teardown.
+   Has effect only when ``manage-user-slice`` is enabled; otherwise
+   housekeeping exits early and performs no slice teardown or cleanup.
    (Default: ``false``).
 
    When set to ``true``, housekeeping implements aggressive cleanup:
