@@ -65,6 +65,7 @@ test_expect_success 're-configure flux with pam.manage-user-slice enabled' '
 	[pam]
 	manage-user-slice = true
 	[exec]
+	service = "sdexec"
 	sdexec-constrain-resources = true
 	[exec.testexec]
 	allow-guests = true
@@ -119,6 +120,7 @@ test_expect_success 're-enable pam.manage-user-slice for remaining tests' '
 	[pam]
 	manage-user-slice = true
 	[exec]
+	service = "sdexec"
 	sdexec-constrain-resources = true
 	[exec.testexec]
 	allow-guests = true
@@ -210,6 +212,7 @@ test_expect_success 'configure pam.kill-user-slice with short grace time' '
 	kill-user-slice = true
 	kill-slice-grace-time = "0.1s"
 	[exec]
+	service = "sdexec"
 	sdexec-constrain-resources = true
 	[exec.testexec]
 	allow-guests = true
@@ -260,6 +263,7 @@ test_expect_success 'configure kill-user-slice without grace time override' '
 	manage-user-slice = true
 	kill-user-slice = true
 	[exec]
+	service = "sdexec"
 	sdexec-constrain-resources = true
 	[exec.testexec]
 	allow-guests = true
@@ -359,6 +363,7 @@ test_expect_success MULTICORE 'configure for concurrent tests' '
 	[pam]
 	manage-user-slice = true
 	[exec]
+	service = "sdexec"
 	sdexec-constrain-resources = true
 	[exec.testexec]
 	allow-guests = true
