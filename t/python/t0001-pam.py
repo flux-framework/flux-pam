@@ -943,6 +943,86 @@ class TestPAMHelperErrors(unittest.TestCase):
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
+    def test_modify_slice_resets_device_policy(self):
+        """Test modify_slice clears a policy left by an earlier update"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # A mapper leaving device access unrestricted omits
+                    # DevicePolicy. Without a reset, a "closed" policy set
+                    # for an earlier job would still confine the slice.
+                    helper.modify_slice({"AllowedCPUs": "0-1"})
+
+                    args = mock_run.call_args[0][0]
+                    self.assertIn("DevicePolicy=auto", args)
+
+                    # An empty value is rejected by systemd, unlike the
+                    # DeviceAllow list reset
+                    self.assertNotIn("DevicePolicy=", args)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_device_policy_overrides_reset(self):
+        """Test modify_slice lets the mapper policy win over the reset"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    helper.modify_slice(
+                        {
+                            "DevicePolicy": "closed",
+                            "DeviceAllow": "/dev/kfd rw",
+                        }
+                    )
+
+                    args = mock_run.call_args[0][0]
+
+                    # systemd takes the last assignment, so the reset must
+                    # come first for the mapper's policy to be the one set
+                    self.assertLess(
+                        args.index("DevicePolicy=auto"),
+                        args.index("DevicePolicy=closed"),
+                    )
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_allows_all_devices(self):
+        """Test modify_slice leaves access unrestricted for auto policy"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # "auto" with an empty list allows every device, so the
+                    # resets must not turn this into a restrictive policy.
+                    helper.modify_slice(
+                        {"AllowedCPUs": "0-3", "DevicePolicy": "auto"}
+                    )
+
+                    args = mock_run.call_args[0][0]
+
+                    self.assertIn("DevicePolicy=auto", args)
+                    self.assertNotIn("DevicePolicy=closed", args)
+                    self.assertNotIn("DevicePolicy=strict", args)
+
+                    # Only the reset: granting no devices under "auto" is
+                    # what leaves access unrestricted
+                    devices = [
+                        arg for arg in args if arg.startswith("DeviceAllow=")
+                    ]
+                    self.assertEqual(devices, ["DeviceAllow="])
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
 
 class TestPAMHelperWithMapper(unittest.TestCase):
     """Test PAMHelper with real sdexec-mapper module."""
