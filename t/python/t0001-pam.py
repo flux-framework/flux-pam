@@ -795,6 +795,65 @@ class TestPAMHelperErrors(unittest.TestCase):
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
+    def test_modify_slice_splits_device_allow(self):
+        """Test modify_slice emits one DeviceAllow argument per device"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # A single GPU already yields multiple devices. Include
+                    # padded and empty fields, which systemd would reject.
+                    properties = {
+                        "AllowedCPUs": "0-3",
+                        "DeviceAllow": (
+                            "/dev/nvidia0 rw,/dev/nvidiactl rw,"
+                            " /dev/nvidia-uvm rw ,"
+                        ),
+                        "DevicePolicy": "closed",
+                    }
+                    helper.modify_slice(properties)
+
+                    args = mock_run.call_args[0][0]
+                    devices = [
+                        arg for arg in args if arg.startswith("DeviceAllow=")
+                    ]
+
+                    # One argument per device, no commas, no stray padding
+                    self.assertEqual(
+                        devices,
+                        [
+                            "DeviceAllow=/dev/nvidia0 rw",
+                            "DeviceAllow=/dev/nvidiactl rw",
+                            "DeviceAllow=/dev/nvidia-uvm rw",
+                        ],
+                    )
+
+                    # Non-list properties keep commas: systemd accepts
+                    # AllowedCPUs=0,2,4 but rejects a comma in DeviceAllow
+                    self.assertIn("AllowedCPUs=0-3", args)
+                    self.assertIn("DevicePolicy=closed", args)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_single_device_allow(self):
+        """Test modify_slice passes a lone DeviceAllow entry through"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    helper.modify_slice({"DeviceAllow": "/dev/kfd rw"})
+
+                    args = mock_run.call_args[0][0]
+                    self.assertIn("DeviceAllow=/dev/kfd rw", args)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
 
 class TestPAMHelperWithMapper(unittest.TestCase):
     """Test PAMHelper with real sdexec-mapper module."""

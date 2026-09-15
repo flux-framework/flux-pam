@@ -13,6 +13,21 @@ if test -n "${MOCK_SYSTEMCTL_FAIL}" \
     exit 1
 fi
 
+# Reject DeviceAllow values real systemd rejects: each assignment is one
+# "<path> <perms>" entry, so an embedded comma or a leading space fails.
+for arg in "$@"; do
+    case "$arg" in
+    DeviceAllow=*,*)
+        echo "mock-systemctl: $arg: requires combination of rwm flags" >&2
+        exit 1
+        ;;
+    "DeviceAllow= "*)
+        echo "mock-systemctl: $arg: requires device node or pattern" >&2
+        exit 1
+        ;;
+    esac
+done
+
 # Log command with timestamp and job ID
 # Format: timestamp jobid command args...
 echo "$(date +%s.%N) $JOBID $*" >> "$LOGFILE"
