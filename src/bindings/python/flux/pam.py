@@ -362,10 +362,24 @@ class PAMHelper:
         embedded comma. Split such values into one assignment per entry,
         which systemd accumulates into the list.
 
+        A bare "DeviceAllow=" resets that list, and is emitted ahead of any
+        entries so the slice holds only the devices computed for the jobs
+        running now. set-property leaves unnamed properties untouched, so
+        without it the previous list would survive an update that grants
+        fewer devices, or none at all. The reset is unconditional: what it
+        clears is whatever an earlier update left on the slice, which the
+        properties arriving now say nothing about.
+
+        An empty dict still resets, since a mapper returning no properties
+        means execution is unconstrained, which the devices left by an
+        earlier update would contradict. Only None skips the slice
+        entirely.
+
         Args:
-            properties: Dictionary of systemd properties
+            properties: Dictionary of systemd properties, or None to
+                leave the slice untouched
         """
-        if not properties:
+        if properties is None:
             return
 
         slice_name = f"user-{self.userid}.slice"
@@ -375,6 +389,13 @@ class PAMHelper:
             "--runtime",
             slice_name,
         ]
+
+        # Reset first: a bare assignment appearing after entries would drop
+        # them. Emit it unconditionally, since what has to be cleared is
+        # whatever an earlier update left on the slice, which says nothing
+        # about which properties arrive now. systemd accepts a reset even
+        # when the list is already empty.
+        args.append("DeviceAllow=")
 
         for key, value in properties.items():
             if key == "DeviceAllow":
@@ -433,15 +454,12 @@ class PAMHelper:
             f"{script_type}: lookup_properties returned {properties}"
         )
 
-        # Apply properties to slice
-        if properties:
-            self.debug_log(
-                f"{script_type}: applying {len(properties)} "
-                f"properties to slice"
-            )
-            self.modify_slice(properties)
-        else:
-            self.debug_log(f"{script_type}: no properties to apply")
+        # Apply properties to slice. An empty set is still applied, so that
+        # devices left by an earlier update are cleared.
+        self.debug_log(
+            f"{script_type}: applying {len(properties)} properties to slice"
+        )
+        self.modify_slice(properties)
 
     def debug_log(self, msg):
         """Log a debug message prefixed with this job's ID."""

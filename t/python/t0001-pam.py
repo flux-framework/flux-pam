@@ -307,14 +307,24 @@ class TestPAMHelper(unittest.TestCase):
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
     def test_modify_slice_empty_properties(self):
-        """Test modify_slice returns early with empty properties"""
+        """Test modify_slice resets devices with empty properties"""
         uid = os.getuid()
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with flux.pam.PAMHelper(uid, 12345) as helper:
-                # Should not raise, just return
-                helper.modify_slice({})
-                helper.modify_slice(None)
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # A mapper returning no properties means execution is
+                    # unconstrained, so devices from an earlier update are
+                    # cleared rather than left in place.
+                    helper.modify_slice({})
+
+                    args = mock_run.call_args[0][0]
+                    self.assertIn("DeviceAllow=", args)
+
+                    # None leaves the slice alone
+                    mock_run.reset_mock()
+                    helper.modify_slice(None)
+                    mock_run.assert_not_called()
         finally:
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
@@ -819,10 +829,12 @@ class TestPAMHelperErrors(unittest.TestCase):
                         arg for arg in args if arg.startswith("DeviceAllow=")
                     ]
 
-                    # One argument per device, no commas, no stray padding
+                    # A reset, then one argument per device, no commas
+                    # and no stray padding
                     self.assertEqual(
                         devices,
                         [
+                            "DeviceAllow=",
                             "DeviceAllow=/dev/nvidia0 rw",
                             "DeviceAllow=/dev/nvidiactl rw",
                             "DeviceAllow=/dev/nvidia-uvm rw",
