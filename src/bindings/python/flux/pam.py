@@ -370,14 +370,20 @@ class PAMHelper:
         clears is whatever an earlier update left on the slice, which the
         properties arriving now say nothing about.
 
+        DevicePolicy is reset the same way, to its "auto" default, so the
+        slice is not held to a stricter policy set for an earlier job when
+        the mapper leaves device access unrestricted. It takes the default
+        value rather than an empty one, which systemd rejects: the two
+        properties are reset together but not interchangeably.
+
         An empty dict still resets, since a mapper returning no properties
         means execution is unconstrained, which the devices left by an
         earlier update would contradict. Only None skips the slice
         entirely.
 
         Args:
-            properties: Dictionary of systemd properties, or None to
-                leave the slice untouched
+            properties: Dictionary of systemd properties, or None to leave
+                the slice untouched
         """
         if properties is None:
             return
@@ -394,8 +400,10 @@ class PAMHelper:
         # them. Emit it unconditionally, since what has to be cleared is
         # whatever an earlier update left on the slice, which says nothing
         # about which properties arrive now. systemd accepts a reset even
-        # when the list is already empty.
+        # when the list is already empty. A later assignment of either
+        # property overrides the reset.
         args.append("DeviceAllow=")
+        args.append("DevicePolicy=auto")
 
         for key, value in properties.items():
             if key == "DeviceAllow":

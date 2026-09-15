@@ -320,6 +320,10 @@ class TestPAMHelper(unittest.TestCase):
 
                     args = mock_run.call_args[0][0]
                     self.assertIn("DeviceAllow=", args)
+                    self.assertIn("DevicePolicy=auto", args)
+
+                    # Nothing beyond the resets is set
+                    self.assertEqual(len(args), 6)
 
                     # None leaves the slice alone
                     mock_run.reset_mock()
