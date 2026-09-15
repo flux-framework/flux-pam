@@ -1,0 +1,22 @@
+#!/bin/sh
+# systemctl wrapper that redirects to the calling user's systemd manager.
+#
+# The prolog applies properties to user-$UID.slice, a system-scope unit that
+# requires root. Tests run unprivileged, so redirect to the user manager,
+# where the same unit name is a distinct unit in a separate namespace. The
+# property values and their validation are identical, so this exercises the
+# real systemctl parser without touching the system slice.
+#
+# Ingest only: the device controller is not delegated to the user manager,
+# so it stores DeviceAllow without enforcing it.
+#
+# Unit lifecycle verbs are not meaningful for the user manager's copy of
+# user@$UID.service, so report success without acting on them.
+
+case "$1" in
+start | stop | kill)
+    exit 0
+    ;;
+esac
+
+exec systemctl --user "$@"
