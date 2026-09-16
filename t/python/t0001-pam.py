@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import flux
 import flux.job
@@ -288,19 +288,58 @@ class TestPAMHelper(unittest.TestCase):
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
     def test_lookup_properties_rpc_failure(self):
-        """Test lookup_properties returns {} when RPC fails"""
+        """Test lookup_properties raises when RPC fails"""
         uid = os.getuid()
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with flux.pam.PAMHelper(uid, 12345) as helper:
+                # Stands in for a ResourceSet, which is only encoded here
+                R = Mock()
+                R.encode.return_value = "{}"
+
                 # Mock rpc to raise exception
                 with patch.object(
                     helper.handle,
                     "rpc",
                     side_effect=OSError("RPC failed"),
                 ):
-                    props = helper.lookup_properties({"some": "R"})
-                    self.assertEqual(props, {})
+                    # Returning {} here would leave the slice unconstrained
+                    with self.assertRaises(OSError):
+                        helper.lookup_properties(R)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_apply_resource_constraints_lookup_failure(self):
+        """Test apply_resource_constraints fails when the lookup fails"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                helper.apply_resources = True
+
+                R = Mock()
+                R.encode.return_value = "{}"
+
+                with patch.object(helper, "resource_union", return_value=R):
+                    # The mapper reports a GPU device node missing on this
+                    # node, which must not leave the slice unconstrained.
+                    # The error is raised where the mapper is called, so
+                    # that lookup_properties is exercised, not mocked.
+                    with patch.object(
+                        helper.handle,
+                        "rpc",
+                        side_effect=OSError(
+                            errno.ENODEV, "GPU 0000:01:00.0: not found"
+                        ),
+                    ):
+                        with patch.object(helper, "modify_slice") as modify:
+                            with self.assertRaises(OSError):
+                                helper.apply_resource_constraints("prolog")
+
+                            # The slice is left alone on a failed lookup
+                            modify.assert_not_called()
         finally:
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)

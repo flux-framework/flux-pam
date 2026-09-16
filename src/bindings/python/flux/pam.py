@@ -335,22 +335,29 @@ class PAMHelper:
         Caller should check should_skip() first to determine if feature
         is enabled.
 
+        A failed lookup is fatal, as for the other constraint steps: the
+        caller asked for resource constraints, and returning no properties
+        would leave the slice unconstrained instead, so the user's login
+        sessions would reach resources their jobs were not allocated. This
+        covers the mapper being absent as well as errors from it, such as
+        a GPU device node missing on the node. Resource constraints are
+        disabled with exec.sdexec-constrain-resources, not by an
+        unreachable mapper.
+
         Args:
             R: Resource set (from resource_union())
 
         Returns:
-            Dictionary of systemd properties, or empty dict on error
+            Dictionary of systemd properties, or empty dict if there are
+            no resources to constrain
+
+        Raises:
+            OSError: If the mapper request fails
         """
         if not R:
             return {}
 
-        try:
-            return self.handle.rpc(
-                "sdexec-mapper.lookup", {"R": R.encode()}
-            ).get()
-        except Exception as exc:
-            print(f"sdexec-mapper.lookup: {exc}", file=sys.stderr)
-            return {}
+        return self.handle.rpc("sdexec-mapper.lookup", {"R": R.encode()}).get()
 
     def modify_slice(self, properties):
         """
