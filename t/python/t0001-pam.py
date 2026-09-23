@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import flux
 import flux.job
@@ -288,33 +288,86 @@ class TestPAMHelper(unittest.TestCase):
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
     def test_lookup_properties_rpc_failure(self):
-        """Test lookup_properties returns {} when RPC fails"""
+        """Test lookup_properties raises when RPC fails"""
         uid = os.getuid()
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with flux.pam.PAMHelper(uid, 12345) as helper:
+                # Stands in for a ResourceSet, which is only encoded here
+                R = Mock()
+                R.encode.return_value = "{}"
+
                 # Mock rpc to raise exception
                 with patch.object(
                     helper.handle,
                     "rpc",
                     side_effect=OSError("RPC failed"),
                 ):
-                    props = helper.lookup_properties({"some": "R"})
-                    self.assertEqual(props, {})
+                    # Returning {} here would leave the slice unconstrained
+                    with self.assertRaises(OSError):
+                        helper.lookup_properties(R)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_apply_resource_constraints_lookup_failure(self):
+        """Test apply_resource_constraints fails when the lookup fails"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                helper.apply_resources = True
+
+                R = Mock()
+                R.encode.return_value = "{}"
+
+                with patch.object(helper, "resource_union", return_value=R):
+                    # The mapper reports a GPU device node missing on this
+                    # node, which must not leave the slice unconstrained.
+                    # The error is raised where the mapper is called, so
+                    # that lookup_properties is exercised, not mocked.
+                    with patch.object(
+                        helper.handle,
+                        "rpc",
+                        side_effect=OSError(
+                            errno.ENODEV, "GPU 0000:01:00.0: not found"
+                        ),
+                    ):
+                        with patch.object(helper, "modify_slice") as modify:
+                            with self.assertRaises(OSError):
+                                helper.apply_resource_constraints("prolog")
+
+                            # The slice is left alone on a failed lookup
+                            modify.assert_not_called()
         finally:
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
     def test_modify_slice_empty_properties(self):
-        """Test modify_slice returns early with empty properties"""
+        """Test modify_slice resets devices with empty properties"""
         uid = os.getuid()
         os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
         try:
             with flux.pam.PAMHelper(uid, 12345) as helper:
-                # Should not raise, just return
-                helper.modify_slice({})
-                helper.modify_slice(None)
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # A mapper returning no properties means execution is
+                    # unconstrained, so devices from an earlier update are
+                    # cleared rather than left in place.
+                    helper.modify_slice({})
+
+                    args = mock_run.call_args[0][0]
+                    self.assertIn("DeviceAllow=", args)
+                    self.assertIn("DevicePolicy=auto", args)
+
+                    # Nothing beyond the resets is set
+                    self.assertEqual(len(args), 6)
+
+                    # None leaves the slice alone
+                    mock_run.reset_mock()
+                    helper.modify_slice(None)
+                    mock_run.assert_not_called()
         finally:
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
@@ -819,10 +872,12 @@ class TestPAMHelperErrors(unittest.TestCase):
                         arg for arg in args if arg.startswith("DeviceAllow=")
                     ]
 
-                    # One argument per device, no commas, no stray padding
+                    # A reset, then one argument per device, no commas
+                    # and no stray padding
                     self.assertEqual(
                         devices,
                         [
+                            "DeviceAllow=",
                             "DeviceAllow=/dev/nvidia0 rw",
                             "DeviceAllow=/dev/nvidiactl rw",
                             "DeviceAllow=/dev/nvidia-uvm rw",
@@ -849,6 +904,159 @@ class TestPAMHelperErrors(unittest.TestCase):
 
                     args = mock_run.call_args[0][0]
                     self.assertIn("DeviceAllow=/dev/kfd rw", args)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_resets_device_allow(self):
+        """Test modify_slice clears devices left by an earlier update"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # The mapper omits DeviceAllow when no GPUs are
+                    # allocated, as when a GPU job ends and a job needing
+                    # no devices keeps running.
+                    helper.modify_slice(
+                        {"AllowedCPUs": "0-1", "DevicePolicy": "closed"}
+                    )
+
+                    args = mock_run.call_args[0][0]
+                    devices = [
+                        arg for arg in args if arg.startswith("DeviceAllow=")
+                    ]
+
+                    # Reset only: without it the earlier devices persist
+                    self.assertEqual(devices, ["DeviceAllow="])
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_resets_without_device_properties(self):
+        """Test modify_slice resets devices with no device property set"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # A mapper overriding finalize_properties need not set
+                    # DevicePolicy, but devices from an earlier update have
+                    # to be cleared just the same.
+                    helper.modify_slice({"AllowedCPUs": "0-1"})
+
+                    args = mock_run.call_args[0][0]
+                    self.assertIn("DeviceAllow=", args)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_reset_precedes_entries(self):
+        """Test modify_slice emits the DeviceAllow reset before entries"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # DeviceAllow precedes DevicePolicy here: the reset must
+                    # lead regardless of the order properties arrive in
+                    helper.modify_slice(
+                        {
+                            "DeviceAllow": "/dev/kfd rw",
+                            "DevicePolicy": "closed",
+                        }
+                    )
+
+                    args = mock_run.call_args[0][0]
+
+                    # A reset after an entry would discard it
+                    self.assertLess(
+                        args.index("DeviceAllow="),
+                        args.index("DeviceAllow=/dev/kfd rw"),
+                    )
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_resets_device_policy(self):
+        """Test modify_slice clears a policy left by an earlier update"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # A mapper leaving device access unrestricted omits
+                    # DevicePolicy. Without a reset, a "closed" policy set
+                    # for an earlier job would still confine the slice.
+                    helper.modify_slice({"AllowedCPUs": "0-1"})
+
+                    args = mock_run.call_args[0][0]
+                    self.assertIn("DevicePolicy=auto", args)
+
+                    # An empty value is rejected by systemd, unlike the
+                    # DeviceAllow list reset
+                    self.assertNotIn("DevicePolicy=", args)
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_device_policy_overrides_reset(self):
+        """Test modify_slice lets the mapper policy win over the reset"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    helper.modify_slice(
+                        {
+                            "DevicePolicy": "closed",
+                            "DeviceAllow": "/dev/kfd rw",
+                        }
+                    )
+
+                    args = mock_run.call_args[0][0]
+
+                    # systemd takes the last assignment, so the reset must
+                    # come first for the mapper's policy to be the one set
+                    self.assertLess(
+                        args.index("DevicePolicy=auto"),
+                        args.index("DevicePolicy=closed"),
+                    )
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_modify_slice_allows_all_devices(self):
+        """Test modify_slice leaves access unrestricted for auto policy"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                with patch("flux.pam.run_subprocess") as mock_run:
+                    # "auto" with an empty list allows every device, so the
+                    # resets must not turn this into a restrictive policy.
+                    helper.modify_slice(
+                        {"AllowedCPUs": "0-3", "DevicePolicy": "auto"}
+                    )
+
+                    args = mock_run.call_args[0][0]
+
+                    self.assertIn("DevicePolicy=auto", args)
+                    self.assertNotIn("DevicePolicy=closed", args)
+                    self.assertNotIn("DevicePolicy=strict", args)
+
+                    # Only the reset: granting no devices under "auto" is
+                    # what leaves access unrestricted
+                    devices = [
+                        arg for arg in args if arg.startswith("DeviceAllow=")
+                    ]
+                    self.assertEqual(devices, ["DeviceAllow="])
         finally:
 
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
