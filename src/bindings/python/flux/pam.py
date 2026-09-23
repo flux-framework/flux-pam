@@ -356,6 +356,12 @@ class PAMHelper:
         """
         Apply slice properties to user slice via systemctl set-property.
 
+        DeviceAllow is a systemd list property: the mapper returns its
+        entries joined with commas, but systemctl set-property parses each
+        assignment as a single "<path> <perms>" entry and rejects an
+        embedded comma. Split such values into one assignment per entry,
+        which systemd accumulates into the list.
+
         Args:
             properties: Dictionary of systemd properties
         """
@@ -371,7 +377,15 @@ class PAMHelper:
         ]
 
         for key, value in properties.items():
-            args.append(f"{key}={value}")
+            if key == "DeviceAllow":
+                # Entries may be padded with whitespace; systemd rejects a
+                # leading space, so strip each one and drop empties.
+                for entry in str(value).split(","):
+                    entry = entry.strip()
+                    if entry:
+                        args.append(f"{key}={entry}")
+            else:
+                args.append(f"{key}={value}")
 
         run_subprocess(args)
 
