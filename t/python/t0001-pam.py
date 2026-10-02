@@ -738,6 +738,82 @@ class TestPAMHelperErrors(unittest.TestCase):
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
+    def test_resource_union_reports_lookup_errors(self):
+        """Test resource_union raises when a job's R lookup failed"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                helper._cached_jobids = [flux.job.JobID(99999)]
+
+                # data() does not raise: it drops the failed job and
+                # records why in errors. Returning the smaller union
+                # would under-constrain the slice.
+                with patch("flux.pam.JobKVSLookup") as mock_lookup:
+                    mock_instance = mock_lookup.return_value
+                    mock_instance.errors = ["JobID f1234 unknown"]
+                    mock_instance.data.return_value = []
+
+                    with self.assertRaises(OSError) as ctx:
+                        helper.resource_union()
+                    self.assertIn("JobID f1234 unknown", str(ctx.exception))
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_resource_union_no_R_returned(self):
+        """Test resource_union raises when no R comes back for active jobs"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                helper._cached_jobids = [flux.job.JobID(99999)]
+
+                # No errors reported, yet nothing came back. An empty
+                # union here is indistinguishable from "no jobs to
+                # constrain" at the lookup_properties() guard.
+                with patch("flux.pam.JobKVSLookup") as mock_lookup:
+                    mock_instance = mock_lookup.return_value
+                    mock_instance.errors = []
+                    mock_instance.data.return_value = []
+
+                    with self.assertRaises(OSError):
+                        helper.resource_union()
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_apply_constraints_leaves_slice_on_lookup_errors(self):
+        """Test a failed R lookup does not reset the slice's devices"""
+        uid = os.getuid()
+        os.environ["FLUX_PAM_LOCK_DIR"] = tempfile.mkdtemp()
+        try:
+            with flux.pam.PAMHelper(uid, 12345) as helper:
+                helper.apply_resources = True
+                helper._cached_jobids = [flux.job.JobID(99999)]
+
+                with patch("flux.pam.JobKVSLookup") as mock_lookup:
+                    mock_instance = mock_lookup.return_value
+                    mock_instance.errors = ["rpc: Connection timed out"]
+                    mock_instance.data.return_value = []
+
+                    with patch.object(helper, "modify_slice") as modify:
+                        with self.assertRaises(OSError):
+                            helper.apply_resource_constraints(
+                                "prolog", include_current=True
+                            )
+
+                        # Reaching modify_slice with an empty property
+                        # set would clear DeviceAllow and leave the CPU
+                        # and memory constraints stale.
+                        modify.assert_not_called()
+        finally:
+
+            shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
+            del os.environ["FLUX_PAM_LOCK_DIR"]
+
     def test_resource_union_invalid_R_data(self):
         """Test resource_union when R data can't be parsed"""
         uid = os.getuid()
