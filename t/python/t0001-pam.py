@@ -747,9 +747,12 @@ class TestPAMHelperErrors(unittest.TestCase):
                 # Set cached jobids
                 helper._cached_jobids = [flux.job.JobID(99999)]
 
-                # Mock JobKVSLookup to return invalid R
+                # Mock JobKVSLookup to return invalid R. errors must be
+                # empty, or resource_union refuses before parsing R and
+                # this no longer covers the parse failure.
                 with patch("flux.pam.JobKVSLookup") as mock_lookup:
                     mock_instance = mock_lookup.return_value
+                    mock_instance.errors = []
                     mock_instance.data.return_value = [{"R": "invalid"}]
 
                     # Should raise exception from ResourceSet
