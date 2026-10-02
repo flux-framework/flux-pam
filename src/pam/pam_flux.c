@@ -44,6 +44,7 @@
 #endif
 
 #define PAM_SM_ACCOUNT
+#define PAM_SM_SESSION
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 
