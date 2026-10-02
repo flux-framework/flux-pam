@@ -902,13 +902,21 @@ pam_sm_open_session (pam_handle_t *pamh,
                     scope_name);
     }
 #else
-    /*  Without libsystemd, we cannot verify slice state.
-     *  Log a warning and skip attachment.
+    /*  Reached only when pam.manage-user-slice is enabled, i.e. the admin
+     *  asked for login sessions to be contained in the user slice. This
+     *  build cannot do that, and cannot check the active marker either, so
+     *  admitting the session would place the user on the node with no
+     *  containment at all. Deny instead: the session stack must not grant
+     *  silently weaker isolation than it was configured for.
      */
     pam_syslog (pamh,
-                LOG_WARNING,
-                "libsystemd not available, cannot verify slice state");
-    return PAM_SUCCESS;
+                LOG_ERR,
+                "pam.manage-user-slice is enabled but this module was built "
+                "without libsystemd: denying session for user %s (uid=%u)",
+                user,
+                uid);
+    send_denial_msg (pamh, user, uid);
+    return PAM_SESSION_ERR;
 #endif
 
     return PAM_SUCCESS;
