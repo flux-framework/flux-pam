@@ -14,8 +14,8 @@ PROLOG=${FLUX_BUILD_DIR}/src/scripts/flux-pam-prolog
 HOUSEKEEPING=${FLUX_BUILD_DIR}/src/scripts/flux-pam-housekeeping
 
 SCRIPTSDIR=${SHARNESS_TEST_SRCDIR}/scripts
-export FLUX_PAM_TEST_SYSTEMCTL=${SCRIPTSDIR}/mock-systemctl
-export FLUX_PAM_TEST_LOGINCTL=${SCRIPTSDIR}/mock-loginctl
+export _FLUX_PAM_TEST_SYSTEMCTL=${SCRIPTSDIR}/mock-systemctl
+export _FLUX_PAM_TEST_LOGINCTL=${SCRIPTSDIR}/mock-loginctl
 
 # Use temporary dir for lock files
 export FLUX_PAM_LOCK_DIR=$(pwd)/lock
@@ -56,7 +56,7 @@ broker_unsetenv() {
 test $(flux resource list -no {ncores} -i 0) -gt 1 && test_set_prereq MULTICORE
 
 test_expect_success 'mock-systemctl is executable' '
-	test -x ${FLUX_PAM_TEST_SYSTEMCTL}
+	test -x ${_FLUX_PAM_TEST_SYSTEMCTL}
 '
 test_expect_success 're-configure flux with pam.manage-user-slice enabled' '
 	flux config load <<-'EOT'

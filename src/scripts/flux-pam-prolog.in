@@ -28,8 +28,8 @@ import sys
 import flux.job
 import flux.pam
 
-SYSTEMCTL = os.environ.get("FLUX_PAM_TEST_SYSTEMCTL", "@SYSTEMCTL@")
-LOGINCTL = os.environ.get("FLUX_PAM_TEST_LOGINCTL", "@LOGINCTL@")
+SYSTEMCTL = os.environ.get("_FLUX_PAM_TEST_SYSTEMCTL", "@SYSTEMCTL@")
+LOGINCTL = os.environ.get("_FLUX_PAM_TEST_LOGINCTL", "@LOGINCTL@")
 
 
 def main():
