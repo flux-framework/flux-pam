@@ -621,12 +621,19 @@ static void user_lock_release (int fd)
 
 #endif /* HAVE_LIBSYSTEMD */
 
-static int check_pam_manage_user_slice (pam_handle_t *pamh, int *resultp)
+/*  Fetch pam.manage-user-slice into *resultp, and the instance owner uid
+ *  into *ownerp. *ownerp is set to (uid_t) -1 if the attribute cannot be
+ *  read, which callers treat as "no uid matches".
+ */
+static int check_pam_manage_user_slice (pam_handle_t *pamh,
+                                        int *resultp,
+                                        uid_t *ownerp)
 {
     flux_t *h = NULL;
     flux_future_t *f = NULL;
 
     *resultp = 0;
+    *ownerp = (uid_t) -1;
 
     /* Connect to Flux and fetch config
      */
@@ -634,6 +641,8 @@ static int check_pam_manage_user_slice (pam_handle_t *pamh, int *resultp)
         pam_syslog (pamh, LOG_ERR, "failed to connect to Flux: %m");
         return -1;
     }
+
+    *ownerp = attr_get_uid (h, "security.owner");
 
     /*  Fetch broker config via RPC (not cached handle config).
      */
@@ -728,6 +737,7 @@ pam_sm_open_session (pam_handle_t *pamh,
     const char *service = NULL;
     const void *pam_flux_authorized = NULL;
     int manage_slice;
+    uid_t owner;
     struct options opts = {
         .allow_guest_user = false,
         .debug = false,
@@ -786,7 +796,7 @@ pam_sm_open_session (pam_handle_t *pamh,
     if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_SESSION_ERR;
 
-    if (check_pam_manage_user_slice (pamh, &manage_slice) < 0)
+    if (check_pam_manage_user_slice (pamh, &manage_slice, &owner) < 0)
         return PAM_SESSION_ERR;
 
     /*  Skip attach to user slice if pam.manage-user-slice not set
@@ -796,6 +806,21 @@ pam_sm_open_session (pam_handle_t *pamh,
             pam_syslog (pamh,
                         LOG_INFO,
                         "pam.manage-user-slice not set or false. Skipping.");
+        return PAM_SUCCESS;
+    }
+
+    /*  The prolog and housekeeping scripts skip the instance owner
+     *  unconditionally, so no slice is managed and no active marker is ever
+     *  published for that uid. Requiring the marker here would deny the
+     *  owner every login. Skip session setup to match the scripts rather
+     *  than demand state they do not create.
+     */
+    if (owner != (uid_t) -1 && uid == owner) {
+        if (opts.debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "skipping session setup for instance owner uid=%u",
+                        uid);
         return PAM_SUCCESS;
     }
 
