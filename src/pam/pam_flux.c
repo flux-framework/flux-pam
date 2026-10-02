@@ -422,9 +422,10 @@ static int check_active_marker (pam_handle_t *pamh,
 {
     char path[PATH_MAX];
     struct stat st;
+    int n;
 
-    if (snprintf (path, sizeof (path), "%s/uid.%u.active", lock_dir, uid)
-        >= (int) sizeof (path)) {
+    n = snprintf (path, sizeof (path), "%s/uid.%u.active", lock_dir, uid);
+    if (n < 0 || n >= (int) sizeof (path)) {
         pam_syslog (pamh, LOG_ERR, "marker path overflow for uid %u", uid);
         return -1;
     }
