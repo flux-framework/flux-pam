@@ -84,9 +84,10 @@ static char *uri_to_local (const char *uri)
     if (!(p = strchr (uri+6, '/')))
         return NULL;
 
-    /* Construct local uri from remainder (path)
+    /* Construct local uri from remainder (path), which still has its
+     * leading '/'.
      */
-    if (asprintf (&local_uri, "local:///%s", p) < 0)
+    if (asprintf (&local_uri, "local://%s", p) < 0)
         return NULL;
     return local_uri;
 }
