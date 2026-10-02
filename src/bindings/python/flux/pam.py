@@ -538,8 +538,9 @@ class PAMHelper:
         orphans = []
         # Walk the slice cgroup looking for non-service processes
         for root, dirs, files in os.walk(slice_path):
-            # Skip the user@.service subtree
-            if root.startswith(service_path):
+            # Skip the user@.service subtree: the path itself and what is
+            # below it, rather than every path its name is a prefix of.
+            if root == service_path or root.startswith(service_path + "/"):
                 continue
 
             # Check for processes in this cgroup
