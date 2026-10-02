@@ -58,6 +58,34 @@ test $(flux resource list -no {ncores} -i 0) -gt 1 && test_set_prereq MULTICORE
 test_expect_success 'mock-systemctl is executable' '
 	test -x ${_FLUX_PAM_TEST_SYSTEMCTL}
 '
+# The scripts installed to prolog.d and housekeeping.d are built into
+# inst/ with the test path overrides replaced by the configured path, so
+# nothing in the code that runs as root can redirect systemctl or
+# loginctl. Check the generated artifact, since the build is what removes
+# them. A bare prefix match accepts the empty path a build without
+# libsystemd substitutes.
+INSTDIR=${FLUX_BUILD_DIR}/src/scripts/inst
+
+test_expect_success 'installed scripts bind a literal systemctl path' '
+	grep -E "^SYSTEMCTL = \".*\"$" ${INSTDIR}/flux-pam-prolog &&
+	grep -E "^LOGINCTL = \".*\"$" ${INSTDIR}/flux-pam-prolog &&
+	grep -E "^SYSTEMCTL = \".*\"$" ${INSTDIR}/flux-pam-housekeeping
+'
+test_expect_success 'installed scripts are valid python' '
+	flux python -c "import ast, sys
+for path in sys.argv[1:]:
+    ast.parse(open(path, \"rb\").read())" \
+		${INSTDIR}/flux-pam-prolog ${INSTDIR}/flux-pam-housekeeping
+'
+# The build-tree scripts keep the overrides: the tests below depend on
+# redirecting systemctl at a mock. Checked here so that a strip leaking
+# into the build tree fails once, rather than as a pile of downstream
+# failures with no obvious cause.
+test_expect_success 'build tree scripts keep the test path overrides' '
+	grep -q _FLUX_PAM_TEST_SYSTEMCTL ${PROLOG} &&
+	grep -q _FLUX_PAM_TEST_LOGINCTL ${PROLOG} &&
+	grep -q _FLUX_PAM_TEST_SYSTEMCTL ${HOUSEKEEPING}
+'
 test_expect_success 're-configure flux with pam.manage-user-slice enabled' '
 	flux config load <<-'EOT'
 	[access]
