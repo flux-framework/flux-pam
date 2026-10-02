@@ -53,9 +53,12 @@ user's jobs. When it is enabled, the prolog applies resource limits to the
 slice and the session inherits them. See BEHAVIOR in
 :man5:`flux-config-pam`.
 
-The session module only activates for users granted access by the
-``pam_flux.so`` account module; users admitted by other account modules
-receive ``PAM_IGNORE`` and their sessions run in the default cgroup.
+The session module only activates for users the ``pam_flux.so`` account
+module admitted as the owner of a job on this node. Users admitted by
+another account module, and guests admitted under ``allow-guest-user``,
+receive ``PAM_IGNORE`` and their sessions run in the default cgroup. A
+guest has no job of their own on the node, so there is no slice holding
+the resources their session should be confined to.
 ``pam_flux.so`` must therefore appear in both the account and session
 stacks. Add it as a session provider with the ``requisite`` control field::
 
@@ -81,6 +84,9 @@ allow-guest-user
    - the job is an instance of Flux
    - ``access.allow-guest-user`` is set to ``true`` in the instance
      configuration
+
+  Guests admitted this way are not placed in a slice by the session
+  module. See Session Management.
 
 Session Management Options
 --------------------------
