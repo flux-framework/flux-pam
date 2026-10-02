@@ -697,10 +697,30 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
         auth = PAM_SUCCESS;
         /*  If user is job owner, set pam_flux_authorized sentinel to allow
          *  other PAM callbacks to determine that pam_flux authorized
-         *  access for this login attempt:
+         *  access for this login attempt.
+         *
+         *  Deny if it cannot be stored. Without the sentinel this job
+         *  owner is indistinguishable in the session stack from a user
+         *  admitted by an earlier sufficient module, who is meant to go
+         *  uncontained, so the session would skip the slice.
          */
-        if (result == FLUX_AUTH_JOB_OWNER)
-            pam_set_data (pamh, "pam_flux_authorized", (void *) 0x1, NULL);
+        if (result == FLUX_AUTH_JOB_OWNER) {
+            int rc = pam_set_data (pamh,
+                                   "pam_flux_authorized",
+                                   (void *) 0x1,
+                                   NULL);
+            if (rc != PAM_SUCCESS) {
+                pam_syslog (pamh,
+                            LOG_ERR,
+                            "failed to set authorized sentinel for %s: %s",
+                            user,
+                            pam_strerror (pamh, rc));
+                /*  Return directly: the denial message below reports no
+                 *  active job, which is not why this login is refused.
+                 */
+                return PAM_SYSTEM_ERR;
+            }
+        }
     }
 
     if (auth != PAM_SUCCESS)
