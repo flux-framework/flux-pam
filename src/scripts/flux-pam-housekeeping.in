@@ -27,7 +27,7 @@ import sys
 import flux.job
 import flux.pam
 
-SYSTEMCTL = os.environ.get("FLUX_PAM_TEST_SYSTEMCTL", "@SYSTEMCTL@")
+SYSTEMCTL = os.environ.get("_FLUX_PAM_TEST_SYSTEMCTL", "@SYSTEMCTL@")
 
 
 def main():

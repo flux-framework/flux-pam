@@ -33,8 +33,8 @@ fi
 PROLOG=${FLUX_BUILD_DIR}/src/scripts/flux-pam-prolog
 
 SCRIPTSDIR=${SHARNESS_TEST_SRCDIR}/scripts
-export FLUX_PAM_TEST_SYSTEMCTL=${SCRIPTSDIR}/user-systemctl
-export FLUX_PAM_TEST_LOGINCTL=${SCRIPTSDIR}/mock-loginctl
+export _FLUX_PAM_TEST_SYSTEMCTL=${SCRIPTSDIR}/user-systemctl
+export _FLUX_PAM_TEST_LOGINCTL=${SCRIPTSDIR}/mock-loginctl
 
 export FLUX_PAM_LOCK_DIR=$(pwd)/lock
 export FLUX_PAM_SCRIPTS_DEBUG=1
@@ -61,10 +61,10 @@ slice_revert() {
 }
 
 test_expect_success 'user-systemctl wrapper is executable' '
-	test -x ${FLUX_PAM_TEST_SYSTEMCTL}
+	test -x ${_FLUX_PAM_TEST_SYSTEMCTL}
 '
 test_expect_success 'user systemd rejects a comma-joined DeviceAllow' '
-	test_must_fail ${FLUX_PAM_TEST_SYSTEMCTL} set-property --runtime \
+	test_must_fail ${_FLUX_PAM_TEST_SYSTEMCTL} set-property --runtime \
 	    ${SLICE} "DeviceAllow=/dev/null rw,/dev/zero rw" 2>comma.err &&
 	test_debug "cat comma.err" &&
 	grep -i "rwm flags" comma.err
