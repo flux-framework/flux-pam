@@ -1,3 +1,19 @@
+flux-pam version 0.5.0 - 2026-10-03
+-----------------------------------
+
+ * remove test environment variables from installed prolog and
+   housekeeping scripts (#35)
+ * fix error paths in session management that could bypass slice
+   containment (#34)
+ * minor code and documentation cleanup (#36)
+ * fix corner cases that allow stale properties on user slices (#33)
+ * prolog: fix prolog and housekeeping errors with multiple devices in
+   `DeviceAllow` (#32)
+ * testsuite: set exec.service="sdexec" where necessary (#30)
+ * clearly document flux-pam behavior when `exec.sdexec-constrain-resources`
+   is not set (#29)
+ * build: add LICENSE to tarball (#28)
+
 flux-pam version 0.4.0 - 2026-06-08
 -----------------------------------
 
