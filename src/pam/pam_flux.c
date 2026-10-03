@@ -621,12 +621,19 @@ static void user_lock_release (int fd)
 
 #endif /* HAVE_LIBSYSTEMD */
 
-static int check_pam_manage_user_slice (pam_handle_t *pamh, int *resultp)
+/*  Fetch pam.manage-user-slice into *resultp, and the instance owner uid
+ *  into *ownerp. *ownerp is set to (uid_t) -1 if the attribute cannot be
+ *  read, which callers treat as "no uid matches".
+ */
+static int check_pam_manage_user_slice (pam_handle_t *pamh,
+                                        int *resultp,
+                                        uid_t *ownerp)
 {
     flux_t *h = NULL;
     flux_future_t *f = NULL;
 
     *resultp = 0;
+    *ownerp = (uid_t) -1;
 
     /* Connect to Flux and fetch config
      */
@@ -634,6 +641,8 @@ static int check_pam_manage_user_slice (pam_handle_t *pamh, int *resultp)
         pam_syslog (pamh, LOG_ERR, "failed to connect to Flux: %m");
         return -1;
     }
+
+    *ownerp = attr_get_uid (h, "security.owner");
 
     /*  Fetch broker config via RPC (not cached handle config).
      */
@@ -688,10 +697,30 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
         auth = PAM_SUCCESS;
         /*  If user is job owner, set pam_flux_authorized sentinel to allow
          *  other PAM callbacks to determine that pam_flux authorized
-         *  access for this login attempt:
+         *  access for this login attempt.
+         *
+         *  Deny if it cannot be stored. Without the sentinel this job
+         *  owner is indistinguishable in the session stack from a user
+         *  admitted by an earlier sufficient module, who is meant to go
+         *  uncontained, so the session would skip the slice.
          */
-        if (result == FLUX_AUTH_JOB_OWNER)
-            pam_set_data (pamh, "pam_flux_authorized", (void *) 0x1, NULL);
+        if (result == FLUX_AUTH_JOB_OWNER) {
+            int rc = pam_set_data (pamh,
+                                   "pam_flux_authorized",
+                                   (void *) 0x1,
+                                   NULL);
+            if (rc != PAM_SUCCESS) {
+                pam_syslog (pamh,
+                            LOG_ERR,
+                            "failed to set authorized sentinel for %s: %s",
+                            user,
+                            pam_strerror (pamh, rc));
+                /*  Return directly: the denial message below reports no
+                 *  active job, which is not why this login is refused.
+                 */
+                return PAM_SYSTEM_ERR;
+            }
+        }
     }
 
     if (auth != PAM_SUCCESS)
@@ -728,6 +757,7 @@ pam_sm_open_session (pam_handle_t *pamh,
     const char *service = NULL;
     const void *pam_flux_authorized = NULL;
     int manage_slice;
+    uid_t owner;
     struct options opts = {
         .allow_guest_user = false,
         .debug = false,
@@ -786,7 +816,7 @@ pam_sm_open_session (pam_handle_t *pamh,
     if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_SESSION_ERR;
 
-    if (check_pam_manage_user_slice (pamh, &manage_slice) < 0)
+    if (check_pam_manage_user_slice (pamh, &manage_slice, &owner) < 0)
         return PAM_SESSION_ERR;
 
     /*  Skip attach to user slice if pam.manage-user-slice not set
@@ -796,6 +826,21 @@ pam_sm_open_session (pam_handle_t *pamh,
             pam_syslog (pamh,
                         LOG_INFO,
                         "pam.manage-user-slice not set or false. Skipping.");
+        return PAM_SUCCESS;
+    }
+
+    /*  The prolog and housekeeping scripts skip the instance owner
+     *  unconditionally, so no slice is managed and no active marker is ever
+     *  published for that uid. Requiring the marker here would deny the
+     *  owner every login. Skip session setup to match the scripts rather
+     *  than demand state they do not create.
+     */
+    if (owner != (uid_t) -1 && uid == owner) {
+        if (opts.debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "skipping session setup for instance owner uid=%u",
+                        uid);
         return PAM_SUCCESS;
     }
 
@@ -902,13 +947,21 @@ pam_sm_open_session (pam_handle_t *pamh,
                     scope_name);
     }
 #else
-    /*  Without libsystemd, we cannot verify slice state.
-     *  Log a warning and skip attachment.
+    /*  Reached only when pam.manage-user-slice is enabled, i.e. the admin
+     *  asked for login sessions to be contained in the user slice. This
+     *  build cannot do that, and cannot check the active marker either, so
+     *  admitting the session would place the user on the node with no
+     *  containment at all. Deny instead: the session stack must not grant
+     *  silently weaker isolation than it was configured for.
      */
     pam_syslog (pamh,
-                LOG_WARNING,
-                "libsystemd not available, cannot verify slice state");
-    return PAM_SUCCESS;
+                LOG_ERR,
+                "pam.manage-user-slice is enabled but this module was built "
+                "without libsystemd: denying session for user %s (uid=%u)",
+                user,
+                uid);
+    send_denial_msg (pamh, user, uid);
+    return PAM_SESSION_ERR;
 #endif
 
     return PAM_SUCCESS;

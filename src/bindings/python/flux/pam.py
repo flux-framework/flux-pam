@@ -299,12 +299,25 @@ class PAMHelper:
         Uses cached jobids from active_local_jobs() and fetches R from
         each job using JobKVSLookup.
 
+        A failed lookup is fatal. JobKVSLookup.data() does not raise: it
+        drops jobs whose lookup failed and accumulates the reasons in
+        .errors. Ignoring that turns a partial or total failure into a
+        smaller union, or into None when every lookup fails, which
+        lookup_properties() cannot distinguish from "no jobs to
+        constrain". The slice would then be left unconstrained while the
+        prolog went on to publish the active marker, so the user's login
+        sessions would reach resources their jobs were not allocated.
+
         Args:
             include_current: If True, include self.jobid in the union
                 (needed for prolog to include starting job's resources)
 
         Returns:
-            ResourceSet object with merged resources or empty dict
+            ResourceSet object with merged resources, or an empty dict
+            when there are no jobs to look up
+
+        Raises:
+            OSError: If R could not be looked up for every job
         """
         if self._cached_jobids is None:
             raise RuntimeError("Must call active_local_jobs() first")
@@ -317,13 +330,31 @@ class PAMHelper:
             return {}
 
         # Fetch R for all jobs
+        lookup = JobKVSLookup(self.handle, jobids, "R")
+        results = lookup.data()
+        if lookup.errors:
+            raise OSError(
+                errno.EIO,
+                f"failed to look up R for {len(jobids)} job(s): "
+                f"{', '.join(lookup.errors)}",
+            )
+
         union = None
-        for result in JobKVSLookup(self.handle, jobids, "R").data():
+        for result in results:
             rset = ResourceSet(result["R"])
             if union is None:
                 union = rset
             else:
                 union = union.union(rset)
+
+        if union is None:
+            # No errors reported, yet nothing came back. Refuse rather
+            # than report an empty union the caller would read as
+            # "nothing to constrain".
+            raise OSError(
+                errno.EIO,
+                f"no R returned for {len(jobids)} active job(s)",
+            )
 
         return union
 
