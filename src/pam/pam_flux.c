@@ -44,6 +44,7 @@
 #endif
 
 #define PAM_SM_ACCOUNT
+#define PAM_SM_SESSION
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 
@@ -84,9 +85,10 @@ static char *uri_to_local (const char *uri)
     if (!(p = strchr (uri+6, '/')))
         return NULL;
 
-    /* Construct local uri from remainder (path)
+    /* Construct local uri from remainder (path), which still has its
+     * leading '/'.
      */
-    if (asprintf (&local_uri, "local:///%s", p) < 0)
+    if (asprintf (&local_uri, "local://%s", p) < 0)
         return NULL;
     return local_uri;
 }
@@ -420,9 +422,10 @@ static int check_active_marker (pam_handle_t *pamh,
 {
     char path[PATH_MAX];
     struct stat st;
+    int n;
 
-    if (snprintf (path, sizeof (path), "%s/uid.%u.active", lock_dir, uid)
-        >= (int) sizeof (path)) {
+    n = snprintf (path, sizeof (path), "%s/uid.%u.active", lock_dir, uid);
+    if (n < 0 || n >= (int) sizeof (path)) {
         pam_syslog (pamh, LOG_ERR, "marker path overflow for uid %u", uid);
         return -1;
     }
