@@ -169,14 +169,19 @@ per-rank = true
 # /etc/flux/imp/conf.d/pam.toml
 [run.prolog]
 allowed-users = [ "flux" ]
-allowed-environment = [ "FLUX_*" ]
 path = "/usr/libexec/flux/cmd/flux-run-prolog"
 
 [run.housekeeping]
 allowed-users = [ "flux" ]
-allowed-environment = [ "FLUX_*" ]
 path = "/usr/libexec/flux/cmd/flux-run-housekeeping"
 ```
+
+The prolog and housekeeping scripts require only `FLUX_JOB_ID` and
+`FLUX_JOB_USERID`, which the IMP passes through by default, so
+`allowed-environment` is not needed here. Setting it to a glob such as
+`FLUX_*` is discouraged: every variable it matches is supplied by the
+unprivileged instance owner and placed in the environment of a command
+running as root.
 
 See [flux-config-pam(5)](doc/man5/flux-config-pam.rst) for all available
 configuration options including orphan process cleanup.
