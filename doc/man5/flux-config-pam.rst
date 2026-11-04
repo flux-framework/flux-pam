@@ -336,10 +336,10 @@ constraints ensure that:
 - Users can only access GPUs allocated to their jobs
 - Users cannot access physical devices not explicitly granted
 
-However, users in the same user slice (``user-UID.slice``) share these
-constraints. All of a user's jobs on a node, plus any other processes the
-user starts within ``user@UID.service`` (such as SSH sessions if permitted),
-collectively share the union of resources allocated to the user's jobs.
+However, the slice constraints are the union of resources allocated to
+all of the user's jobs on the node. All processes in ``user-UID.slice``,
+including login session scopes and ``user@UID.service``, share that union
+and are not restricted to the resources of any single job.
 
 Orphan Processes
 ----------------
