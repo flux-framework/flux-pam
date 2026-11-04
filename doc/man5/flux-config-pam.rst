@@ -179,9 +179,10 @@ kill-slice-grace-time
 debug
    Boolean value that enables verbose debug logging for the prolog and
    housekeeping scripts. When ``true``, each script logs its actions to
-   stderr, which is captured in the Flux job-manager log. Equivalent to
-   setting the ``FLUX_PAM_SCRIPTS_DEBUG`` environment variable.
-   (Default: ``false``).
+   stderr. The job manager logs this output on rank 0 at ``LOG_ERR``
+   level; view it with :core:man1:`flux-dmesg`. Equivalent to setting the
+   ``FLUX_PAM_SCRIPTS_DEBUG`` environment variable. See TROUBLESHOOTING
+   in :man8:`pam_flux`. (Default: ``false``).
 
 
 RESOURCE CONSTRAINTS
