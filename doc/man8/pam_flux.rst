@@ -22,9 +22,15 @@ Users without one are denied with the message:
 
   Access denied: user [username] has no active jobs on this node
 
-Add the module as an account provider with the ``sufficient`` control field::
+Add the module as an account provider with the ``sufficient`` control field,
+so other account modules (e.g. ``pam_access.so``) can also grant access::
 
   account sufficient pam_flux.so [OPTIONS]
+
+PAM ignores a failed ``sufficient`` module, so end the account stack with
+``pam_deny.so``. Otherwise, users without a job are admitted. If
+``pam_flux.so`` is the only module that grants access, use ``required``
+instead.
 
 Session Management
 ------------------
@@ -122,6 +128,7 @@ Grant access to Flux job users and guests of multi-user instances::
 
     account required    pam_unix.so
     account sufficient  pam_flux.so allow-guest-user
+    account required    pam_deny.so
 
 Combined Account and Session Management
 ---------------------------------------
