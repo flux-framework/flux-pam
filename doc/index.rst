@@ -38,7 +38,7 @@ For basic access control, add to ``/etc/pam.d/sshd``:
 
 .. code-block:: text
 
-   account  sufficient  pam_flux.so
+   account  required  pam_flux.so
 
 For full session management with resource constraints, see :ref:`pam_flux(8) <man-pages>`.
 
