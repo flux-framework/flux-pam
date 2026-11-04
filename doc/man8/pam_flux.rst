@@ -66,6 +66,11 @@ receive ``PAM_IGNORE`` and their sessions run in the default cgroup. A
 guest has no job of their own on the node, so there is no slice holding
 the resources their session should be confined to.
 
+The session module also skips the Flux instance owner, for whom the
+prolog manages no slice. If ``pam_flux.so`` was built without libsystemd,
+it denies all job owner sessions while ``pam.manage-user-slice`` is
+enabled.
+
 The session module depends on the account module to identify job owners,
 so ``pam_flux.so`` must appear in both the account and session stacks.
 Add it as the first session provider with the ``requisite`` control
