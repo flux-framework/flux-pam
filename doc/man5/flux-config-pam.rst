@@ -239,7 +239,7 @@ Prolog scripts run at job start and perform the following actions (when
 6. Best-effort start ``user@UID.service`` (see PROCFS WITH HIDEPID)
 7. Release the lock
 
-The slice itself is automatically realized by systemd  when the first login
+The slice itself is automatically realized by systemd when the first login
 session scope attaches.
 
 Housekeeping Scripts
