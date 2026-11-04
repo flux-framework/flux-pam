@@ -84,11 +84,16 @@ account  sufficient  pam_flux.so
 account  required    pam_deny.so
 ```
 
+`sufficient` lets other modules such as `pam_access.so` also grant access.
+PAM ignores a failed `sufficient` module, so the stack must end with
+`pam_deny.so`.
+
 To also allow users into a running multi-user Flux instance as guests:
 
 ```
 account  required    pam_unix.so
 account  sufficient  pam_flux.so allow-guest-user
+account  required    pam_deny.so
 ```
 
 ### Full configuration with session management
