@@ -132,7 +132,9 @@ session  required    pam_unix.so
 
 > **Note:** Place `pam_flux.so` first in the session stack. With
 > `requisite`, a slice setup failure denies the session immediately before
-> any other session module runs.
+> any other session module runs. `required` also denies the session, but
+> only after the remaining session modules run for a login that will be
+> denied.
 
 > **Note:** Do not use `pam_systemd.so` alongside `pam_flux.so` session
 > management. logind's process migration and service lifecycle management
