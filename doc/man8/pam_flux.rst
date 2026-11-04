@@ -238,6 +238,66 @@ the systemd D-Bus API, bypassing logind entirely. As a result:
 - Scope units are named ``flux-pam-<pid>.scope`` (or with a custom prefix)
   rather than the logind-assigned ``session-N.scope``.
 
+TROUBLESHOOTING
+===============
+
+Logs
+----
+
+``pam_flux.so`` logs to syslog with :linux:man3:`pam_syslog`, tagged
+``pam_flux(SERVICE:TYPE)``, e.g. ``pam_flux(sshd:session)``. On most
+systems these messages appear in the journal and in ``/var/log/secure``
+or ``/var/log/auth.log``::
+
+  journalctl | grep pam_flux
+
+Errors and denials are always logged. Add ``debug`` to both the account
+and session lines to also log grants, skipped sessions, marker checks,
+and scope creation.
+
+The prolog and housekeeping scripts write errors to stderr. The Flux
+job manager logs this output on rank 0, so view it on the management
+node with :core:man1:`flux-dmesg`, not on the compute node. Set
+``pam.debug = true`` to log each action (see :man5:`flux-config-pam`).
+
+Verifying Operation
+-------------------
+
+To check a deployment with ``pam.manage-user-slice`` enabled:
+
+1. On the compute node, confirm the configuration with
+   ``flux config get pam``.
+2. Submit a job to the node as a test user. Confirm the active marker
+   ``/run/flux-pam/uid.UID.active`` exists. If resource constraints are
+   enabled, confirm the slice properties with
+   ``systemctl show user-UID.slice -p AllowedCPUs -p DeviceAllow``.
+3. Log in to the node as the test user. Confirm that
+   ``cat /proc/self/cgroup`` shows ``user-UID.slice/flux-pam-PID.scope``.
+4. After the job completes, confirm the marker is removed and a new
+   login is denied.
+
+Common Problems
+---------------
+
+Login denied with "no active jobs" while the user has a job
+  If the account module denied the login, check that the job is running
+  on this node. If the session module denied it, the active marker is
+  missing: the prolog did not run or failed. Check the perilog and IMP
+  configuration in :man5:`flux-config-pam` and look for errors with
+  :core:man1:`flux-dmesg`.
+
+"lock dir ... must not be group/other writable"
+  Fix the permissions on the lock directory (see ``lock-dir``).
+
+"StartTransientUnit(...) failed"
+  The session module could not create the scope through systemd. Check
+  the systemd journal for the reason.
+
+Login admitted but not contained
+  The user was admitted by another account module, or is a guest or the
+  instance owner (see Session Management). Also check that
+  ``pam_systemd.so`` is not in the session stack.
+
 RESOURCES
 =========
 
