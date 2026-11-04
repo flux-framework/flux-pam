@@ -193,6 +193,11 @@ running as root.
 See [flux-config-pam(5)](doc/man5/flux-config-pam.rst) for all available
 configuration options including orphan process cleanup.
 
+### Debugging
+
+See TROUBLESHOOTING in [pam_flux(8)](doc/man8/pam_flux.rst) for where
+log messages go and how to verify a deployment.
+
 ## Documentation
 
 | Man page | Description |
