@@ -65,10 +65,19 @@ another account module, and guests admitted under ``allow-guest-user``,
 receive ``PAM_IGNORE`` and their sessions run in the default cgroup. A
 guest has no job of their own on the node, so there is no slice holding
 the resources their session should be confined to.
-``pam_flux.so`` must therefore appear in both the account and session
-stacks. Add it as a session provider with the ``requisite`` control field::
+
+The session module depends on the account module to identify job owners,
+so ``pam_flux.so`` must appear in both the account and session stacks.
+Add it as the first session provider with the ``requisite`` control
+field::
 
   session requisite pam_flux.so [OPTIONS]
+
+If session setup fails, ``requisite`` ends the stack immediately, so no
+other session module runs for a login that will be denied. ``required``
+also denies the login, but only after all remaining session modules
+have run. ``optional`` or ``sufficient`` would admit the user without
+containment.
 
 See EXAMPLES for a complete stack configuration.
 
@@ -149,11 +158,9 @@ session module and are handled by subsequent modules::
     session    required    pam_unix.so
 
 .. note::
-   Place ``pam_flux.so`` first in the session stack. With ``requisite``,
-   such that slice setup failure denies the session immediately before any
-   other session module runs. Use ``requisite`` rather than ``required``
-   or ``optional`` to prevent the user from accessing the node without
-   containment if setup fails.
+   Place ``pam_flux.so`` first in the session stack with ``requisite``,
+   so a session setup failure denies the login before any other session
+   module runs. See Session Management.
 
    Session management is only active when ``pam.manage-user-slice = true``
    is set in the Flux configuration. See :man5:`flux-config-pam`.
