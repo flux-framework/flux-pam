@@ -22,9 +22,15 @@ Users without one are denied with the message:
 
   Access denied: user [username] has no active jobs on this node
 
-Add the module as an account provider with the ``sufficient`` control field::
+Add the module as an account provider with the ``sufficient`` control field,
+so other account modules (e.g. ``pam_access.so``) can also grant access::
 
   account sufficient pam_flux.so [OPTIONS]
+
+PAM ignores a failed ``sufficient`` module, so end the account stack with
+``pam_deny.so``. Otherwise, users without a job are admitted. If
+``pam_flux.so`` is the only module that grants access, use ``required``
+instead.
 
 Session Management
 ------------------
@@ -59,10 +65,24 @@ another account module, and guests admitted under ``allow-guest-user``,
 receive ``PAM_IGNORE`` and their sessions run in the default cgroup. A
 guest has no job of their own on the node, so there is no slice holding
 the resources their session should be confined to.
-``pam_flux.so`` must therefore appear in both the account and session
-stacks. Add it as a session provider with the ``requisite`` control field::
+
+The session module also skips the Flux instance owner, for whom the
+prolog manages no slice. If ``pam_flux.so`` was built without libsystemd,
+it denies all job owner sessions while ``pam.manage-user-slice`` is
+enabled.
+
+The session module depends on the account module to identify job owners,
+so ``pam_flux.so`` must appear in both the account and session stacks.
+Add it as the first session provider with the ``requisite`` control
+field::
 
   session requisite pam_flux.so [OPTIONS]
+
+If session setup fails, ``requisite`` ends the stack immediately, so no
+other session module runs for a login that will be denied. ``required``
+also denies the login, but only after all remaining session modules
+have run. ``optional`` or ``sufficient`` would admit the user without
+containment.
 
 See EXAMPLES for a complete stack configuration.
 
@@ -122,6 +142,7 @@ Grant access to Flux job users and guests of multi-user instances::
 
     account required    pam_unix.so
     account sufficient  pam_flux.so allow-guest-user
+    account required    pam_deny.so
 
 Combined Account and Session Management
 ---------------------------------------
@@ -142,11 +163,9 @@ session module and are handled by subsequent modules::
     session    required    pam_unix.so
 
 .. note::
-   Place ``pam_flux.so`` first in the session stack. With ``requisite``,
-   such that slice setup failure denies the session immediately before any
-   other session module runs. Use ``requisite`` rather than ``required``
-   or ``optional`` to prevent the user from accessing the node without
-   containment if setup fails.
+   Place ``pam_flux.so`` first in the session stack with ``requisite``,
+   so a session setup failure denies the login before any other session
+   module runs. See Session Management.
 
    Session management is only active when ``pam.manage-user-slice = true``
    is set in the Flux configuration. See :man5:`flux-config-pam`.
@@ -218,6 +237,66 @@ the systemd D-Bus API, bypassing logind entirely. As a result:
 - ``XDG_SESSION_ID`` is not set in the login shell environment.
 - Scope units are named ``flux-pam-<pid>.scope`` (or with a custom prefix)
   rather than the logind-assigned ``session-N.scope``.
+
+TROUBLESHOOTING
+===============
+
+Logs
+----
+
+``pam_flux.so`` logs to syslog with :linux:man3:`pam_syslog`, tagged
+``pam_flux(SERVICE:TYPE)``, e.g. ``pam_flux(sshd:session)``. On most
+systems these messages appear in the journal and in ``/var/log/secure``
+or ``/var/log/auth.log``::
+
+  journalctl | grep pam_flux
+
+Errors and denials are always logged. Add ``debug`` to both the account
+and session lines to also log grants, skipped sessions, marker checks,
+and scope creation.
+
+The prolog and housekeeping scripts write errors to stderr. The Flux
+job manager logs this output on rank 0, so view it on the management
+node with :core:man1:`flux-dmesg`, not on the compute node. Set
+``pam.debug = true`` to log each action (see :man5:`flux-config-pam`).
+
+Verifying Operation
+-------------------
+
+To check a deployment with ``pam.manage-user-slice`` enabled:
+
+1. On the compute node, confirm the configuration with
+   ``flux config get pam``.
+2. Submit a job to the node as a test user. Confirm the active marker
+   ``/run/flux-pam/uid.UID.active`` exists. If resource constraints are
+   enabled, confirm the slice properties with
+   ``systemctl show user-UID.slice -p AllowedCPUs -p DeviceAllow``.
+3. Log in to the node as the test user. Confirm that
+   ``cat /proc/self/cgroup`` shows ``user-UID.slice/flux-pam-PID.scope``.
+4. After the job completes, confirm the marker is removed and a new
+   login is denied.
+
+Common Problems
+---------------
+
+Login denied with "no active jobs" while the user has a job
+  If the account module denied the login, check that the job is running
+  on this node. If the session module denied it, the active marker is
+  missing: the prolog did not run or failed. Check the perilog and IMP
+  configuration in :man5:`flux-config-pam` and look for errors with
+  :core:man1:`flux-dmesg`.
+
+"lock dir ... must not be group/other writable"
+  Fix the permissions on the lock directory (see ``lock-dir``).
+
+"StartTransientUnit(...) failed"
+  The session module could not create the scope through systemd. Check
+  the systemd journal for the reason.
+
+Login admitted but not contained
+  The user was admitted by another account module, or is a guest or the
+  instance owner (see Session Management). Also check that
+  ``pam_systemd.so`` is not in the session stack.
 
 RESOURCES
 =========

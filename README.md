@@ -84,11 +84,16 @@ account  sufficient  pam_flux.so
 account  required    pam_deny.so
 ```
 
+`sufficient` lets other modules such as `pam_access.so` also grant access.
+PAM ignores a failed `sufficient` module, so the stack must end with
+`pam_deny.so`.
+
 To also allow users into a running multi-user Flux instance as guests:
 
 ```
 account  required    pam_unix.so
 account  sufficient  pam_flux.so allow-guest-user
+account  required    pam_deny.so
 ```
 
 ### Full configuration with session management
@@ -127,7 +132,9 @@ session  required    pam_unix.so
 
 > **Note:** Place `pam_flux.so` first in the session stack. With
 > `requisite`, a slice setup failure denies the session immediately before
-> any other session module runs.
+> any other session module runs. `required` also denies the session, but
+> only after the remaining session modules run for a login that will be
+> denied.
 
 > **Note:** Do not use `pam_systemd.so` alongside `pam_flux.so` session
 > management. logind's process migration and service lifecycle management
@@ -185,6 +192,11 @@ running as root.
 
 See [flux-config-pam(5)](doc/man5/flux-config-pam.rst) for all available
 configuration options including orphan process cleanup.
+
+### Debugging
+
+See TROUBLESHOOTING in [pam_flux(8)](doc/man8/pam_flux.rst) for where
+log messages go and how to verify a deployment.
 
 ## Documentation
 

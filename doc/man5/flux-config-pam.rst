@@ -179,9 +179,10 @@ kill-slice-grace-time
 debug
    Boolean value that enables verbose debug logging for the prolog and
    housekeeping scripts. When ``true``, each script logs its actions to
-   stderr, which is captured in the Flux job-manager log. Equivalent to
-   setting the ``FLUX_PAM_SCRIPTS_DEBUG`` environment variable.
-   (Default: ``false``).
+   stderr. The job manager logs this output on rank 0 at ``LOG_ERR``
+   level; view it with :core:man1:`flux-dmesg`. Equivalent to setting the
+   ``FLUX_PAM_SCRIPTS_DEBUG`` environment variable. See TROUBLESHOOTING
+   in :man8:`pam_flux`. (Default: ``false``).
 
 
 RESOURCE CONSTRAINTS
@@ -238,7 +239,7 @@ Prolog scripts run at job start and perform the following actions (when
 6. Best-effort start ``user@UID.service`` (see PROCFS WITH HIDEPID)
 7. Release the lock
 
-The slice itself is automatically realized by systemd  when the first login
+The slice itself is automatically realized by systemd when the first login
 session scope attaches.
 
 Housekeeping Scripts
@@ -335,10 +336,10 @@ constraints ensure that:
 - Users can only access GPUs allocated to their jobs
 - Users cannot access physical devices not explicitly granted
 
-However, users in the same user slice (``user-UID.slice``) share these
-constraints. All of a user's jobs on a node, plus any other processes the
-user starts within ``user@UID.service`` (such as SSH sessions if permitted),
-collectively share the union of resources allocated to the user's jobs.
+However, the slice constraints are the union of resources allocated to
+all of the user's jobs on the node. All processes in ``user-UID.slice``,
+including login session scopes and ``user@UID.service``, share that union
+and are not restricted to the resources of any single job.
 
 Orphan Processes
 ----------------

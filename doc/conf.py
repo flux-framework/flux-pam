@@ -53,6 +53,10 @@ source_suffix = ".rst"
 extensions = ["sphinx.ext.intersphinx", "sphinx.ext.napoleon", "domainrefs"]
 
 domainrefs = {
+    "linux:man3": {
+        "text": "%s(3)",
+        "url": "http://man7.org/linux/man-pages/man3/%s.3.html",
+    },
     "linux:man5": {
         "text": "%s(5)",
         "url": "http://man7.org/linux/man-pages/man5/%s.5.html",
@@ -64,6 +68,10 @@ domainrefs = {
     "linux:man8": {
         "text": "%s(8)",
         "url": "http://man7.org/linux/man-pages/man8/%s.8.html",
+    },
+    "core:man1": {
+        "text": "%s(1)",
+        "url": "https://flux-framework.readthedocs.io/projects/flux-core/en/latest/man1/%s.html",
     },
     "core:man5": {
         "text": "%s(5)",
