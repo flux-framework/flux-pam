@@ -108,12 +108,12 @@ jobs:
          && github.repository == 'flux-framework/flux-pam'
       uses: softprops/action-gh-release@v3.0.4
       with:
-        tag_name: ${{ steps.tag.output.TAG }}
-        name: flux-pam ${{ steps.tag.output.TAG }}
+        tag_name: ${{ steps.tag.outputs.TAG }}
+        name: flux-pam ${{ steps.tag.outputs.TAG }}
         prerelease: true
         files: flux-pam*.tar.gz
         body: |
-          View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ matrix.tag }}/NEWS.md) for flux-pam ${{ steps.tag.output.TAG }}
+          View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ steps.tag.outputs.TAG }}/NEWS.md) for flux-pam ${{ steps.tag.outputs.TAG }}
 
   system-tests:
     runs-on: ubuntu-latest
