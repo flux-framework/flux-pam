@@ -38,7 +38,7 @@ repos:
         language: python
         types: [python]
         entry: mypy
-        additional_dependencies: [mypy==0.931]
+        additional_dependencies: [mypy==1.9.0]
         exclude: '^(src/bindings/python/|src/scripts/)'
   - repo: https://github.com/netromdk/vermin
     rev: v1.8.0
