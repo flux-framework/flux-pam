@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7.0.1
       with:
         ref: ${{ github.event.pull_request.head.sha }}
         fetch-depth: 0
@@ -17,8 +17,8 @@ jobs:
     name: python linting
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/setup-python@v6.2.0
-    - uses: actions/checkout@v6.0.2
+    - uses: actions/setup-python@v7.1.0
+    - uses: actions/checkout@v7.0.1
       with:
         ref: ${{ github.event.pull_request.head.sha }}
         fetch-depth: 0
@@ -30,9 +30,9 @@ jobs:
   spelling:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6.0.2
+    - uses: actions/checkout@v7.0.1
     - name: Check Spelling
-      uses: crate-ci/typos@v1.46.0
+      uses: crate-ci/typos@v1.52.0
 
   ci-checks:
     runs-on: ubuntu-latest
@@ -66,7 +66,7 @@ jobs:
     name: ${{ matrix.name }}
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
        ref: ${{ github.event.pull_request.head.sha }}
        fetch-depth: 0
@@ -106,14 +106,14 @@ jobs:
          && matrix.create_release
          && startswith(github.ref, 'refs/tags')
          && github.repository == 'flux-framework/flux-pam'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v3.0.4
       with:
-        tag_name: ${{ steps.tag.output.TAG }}
-        name: flux-pam ${{ steps.tag.output.TAG }}
+        tag_name: ${{ steps.tag.outputs.TAG }}
+        name: flux-pam ${{ steps.tag.outputs.TAG }}
         prerelease: true
         files: flux-pam*.tar.gz
         body: |
-          View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ matrix.tag }}/NEWS.md) for flux-pam ${{ steps.tag.output.TAG }}
+          View [Release Notes](https://github.com/${{ github.repository }}/blob/${{ steps.tag.outputs.TAG }}/NEWS.md) for flux-pam ${{ steps.tag.outputs.TAG }}
 
   system-tests:
     runs-on: ubuntu-latest
@@ -126,7 +126,7 @@ jobs:
     name: "el8 system tests"
     steps:
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
       with:
        ref: ${{ github.event.pull_request.head.sha }}
        fetch-depth: 0
