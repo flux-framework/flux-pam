@@ -322,6 +322,17 @@ Login admitted but not contained
   instance owner (see Session Management). Also check that
   ``pam_systemd.so`` is not in the session stack.
 
+``user@UID.service`` fails to start
+  Jobs and logins still work, but ``systemctl --user`` does not. Check
+  ``journalctl -u user@UID.service``. A PAM failure there, such as
+  "Failed to set up PAM session", means the ``systemd-user`` stack denies
+  the user (see systemd-user Service). ``pam_flux.so`` never denies for
+  ``systemd-user``, so for a job user, check that ``pam_flux.so`` is in the
+  account stack before any module that denies. For the Flux instance owner
+  or another service account, check that the stack admits the account
+  before it reaches ``pam_deny.so``. On nodes with ``hidepid=2``, see
+  /proc with hidepid.
+
 RESOURCES
 =========
 
