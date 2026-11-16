@@ -768,9 +768,9 @@ pam_sm_open_session (pam_handle_t *pamh,
     if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SESSION_ERR;
 
-    /*  Skip systemd-user service - it's starting user@UID.service itself.
-     *  Creating a scope under user-UID.slice from within that service's own
-     *  startup is circular and not meaningful.
+    /*  systemd-user is the service systemd uses to start user@UID.service.
+     *  Skip it: the user manager belongs in its service, not a login scope,
+     *  and the prolog holds the user lock while it waits for the start.
      */
     pam_get_item (pamh, PAM_SERVICE, (const void **) &service);
     if (service && strcmp (service, "systemd-user") == 0) {
