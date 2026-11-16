@@ -24,11 +24,17 @@ if grep -i error ld_preload.out >/dev/null 2>&1; then
 	test_done
 fi
 
-pamtest() {
+pamtest_service() {
+	service=$1
+	shift
 	LD_PRELOAD=libpam_wrapper.so \
 	PAM_WRAPPER=1 \
 	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
-	${PAMTEST} -v -s pam-test "$@"
+	${PAMTEST} -v -s ${service} "$@"
+}
+
+pamtest() {
+	pamtest_service pam-test "$@"
 }
 
 pamtest_on_rank() {
