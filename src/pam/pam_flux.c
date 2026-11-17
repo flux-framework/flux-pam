@@ -426,17 +426,21 @@ static int parse_options (pam_handle_t *pamh,
  *  calls, so the systemd-user account check works without libsystemd.
  */
 
-/*  Verify the lock directory is not group or other writable, so that only
- *  its owner (root, for the default /run/flux-pam) can create lock or
- *  marker files in it.
+/*  Verify the lock directory is a directory, not a symlink, and not group
+ *  or other writable, so that only its owner can create lock or marker
+ *  files in it.
  *  Returns 0 if the directory is acceptable, -1 otherwise.
  */
 static int check_lock_dir (pam_handle_t *pamh, const char *lock_dir)
 {
     struct stat st;
 
-    if (stat (lock_dir, &st) < 0) {
+    if (lstat (lock_dir, &st) < 0) {
         pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+        return -1;
+    }
+    if (!S_ISDIR (st.st_mode)) {
+        pam_syslog (pamh, LOG_ERR, "lock dir %s is not a directory", lock_dir);
         return -1;
     }
     if (st.st_mode & (S_IWGRP | S_IWOTH)) {
@@ -793,9 +797,9 @@ static int systemd_user_acct_mgmt (pam_handle_t *pamh,
      *  This is safe because:
      *
      *  - Only root can create the marker or open the lock file: the lock
-     *    dir must be owned by root and not group or other writable, the
-     *    marker must be a regular file, and the lock file must not be a
-     *    symlink.
+     *    dir must be a root-owned directory that is not group or other
+     *    writable, the marker must be a regular file, and the lock file
+     *    must not be a symlink.
      *
      *  - A stale marker is never trusted alone. A crashed prolog or
      *    housekeeping holds no lock, because the kernel releases a flock
