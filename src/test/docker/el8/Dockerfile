@@ -20,8 +20,11 @@ RUN sudo yum -y update \
 RUN cd /tmp \
  && mkdir pam_wrapper \
  && cd pam_wrapper \
- && wget -O - https://ftp.samba.org/pub/cwrap/pam_wrapper-1.1.4.tar.gz \
-     | tar xvz --strip-components 1 \
+ && { wget -T 30 -t 2 -O pam_wrapper.tar.gz \
+        https://ftp.samba.org/pub/cwrap/pam_wrapper-1.1.4.tar.gz \
+     || wget -O pam_wrapper.tar.gz \
+        https://gitlab.com/cwrap/pam_wrapper/-/archive/pam_wrapper-1.1.4/pam_wrapper-pam_wrapper-1.1.4.tar.gz ; } \
+ && tar xvzf pam_wrapper.tar.gz --strip-components 1 \
  && mkdir obj \
  && cd obj \
  && cmake -DCMAKE_INSTALL_PREFIX=/usr -DLIB_SUFFIX=64 .. \
