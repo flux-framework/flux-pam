@@ -407,6 +407,28 @@ static int parse_options (pam_handle_t *pamh,
 
 #ifdef HAVE_LIBSYSTEMD
 
+/*  Verify the lock directory is not group or other writable, so that only
+ *  its owner (root, for the default /run/flux-pam) can create lock or
+ *  marker files in it.
+ *  Returns 0 if the directory is acceptable, -1 otherwise.
+ */
+static int check_lock_dir (pam_handle_t *pamh, const char *lock_dir)
+{
+    struct stat st;
+
+    if (stat (lock_dir, &st) < 0) {
+        pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+        return -1;
+    }
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) {
+        pam_syslog (pamh, LOG_ERR,
+                    "lock dir %s must not be group/other writable (mode=%04o)",
+                    lock_dir, st.st_mode & 0777);
+        return -1;
+    }
+    return 0;
+}
+
 /*  Check the per-user active marker created by the Flux prolog. Its presence,
  *  read under the user lock, is the single source of truth that the user has
  *  an active job on the node with containment set up. The prolog creates it
@@ -581,20 +603,10 @@ static int user_lock_acquire (pam_handle_t *pamh,
                               const char *lock_dir)
 {
     char path[PATH_MAX];
-    struct stat st;
     int fd;
 
-    /* Verify lock directory is only writable by root */
-    if (stat (lock_dir, &st) < 0) {
-        pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+    if (check_lock_dir (pamh, lock_dir) < 0)
         return -1;
-    }
-    if (st.st_mode & (S_IWGRP | S_IWOTH)) {
-        pam_syslog (pamh, LOG_ERR,
-                    "lock dir %s must not be group/other writable (mode=%04o)",
-                    lock_dir, st.st_mode & 0777);
-        return -1;
-    }
 
     if (snprintf (path, sizeof (path), "%s/uid.%u.lock", lock_dir, uid)
         >= sizeof (path)) {
