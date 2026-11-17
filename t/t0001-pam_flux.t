@@ -254,6 +254,19 @@ test_expect_success FLOCK 'pam_flux: systemd-user ignores marker that is a symli
 	test_debug "cat su-marker4.out" &&
 	grep "is not a regular file" su-marker4.out
 '
+test_expect_success FLOCK 'pam_flux: systemd-user ignores marker in symlinked lock dir' '
+	rm ${LOCK_DIR}/uid.${MY_UID}.active &&
+	touch ${LOCK_DIR}/uid.${MY_UID}.active &&
+	ln -s ${LOCK_DIR} lock-dir-link &&
+	cat <<-EOF >systemd-user &&
+	auth    required   pam_localuser.so
+	account sufficient ${PAM_FLUX_PATH} debug lock-dir=$(pwd)/lock-dir-link
+	account required   pam_deny.so
+	EOF
+	test_must_fail pamtest_systemd_user_locked -u ${USER} >su-marker5.out 2>&1 &&
+	test_debug "cat su-marker5.out" &&
+	grep "is not a directory" su-marker5.out
+'
 test_expect_success 'pam_flux: systemd-user uses /run/flux-pam by default' '
 	cat <<-EOF >systemd-user &&
 	auth    required   pam_localuser.so
