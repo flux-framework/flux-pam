@@ -14,6 +14,7 @@
  *
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 #include <libgen.h>
@@ -28,15 +29,20 @@
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
 
-#define GETOPT_ARGS "hvu:s:Se"
+#define GETOPT_ARGS "hvu:s:SeE:D:"
 #define USAGE "\
-Usage %s [-v] -u user -s service [-S] [-e] [cmd [args...]]\n\
+Usage %s [-v] -u user -s service [-S] [-e] [-E name]\n\
+          [-D name=value]\n\
+          [cmd [args...]]\n\
   -h          This help message.\n\
   -v          Verbose operation\n\
   -s service  Use service name \"service\"\n\
   -u user     Use user name \"user\"\n\
   -S          Call session functions (open/close)\n\
   -e          Print PAM environment after session open\n\
+  -E name     Print process environment variable \"name\" after PAM calls\n\
+              (may be repeated)\n\
+  -D nm=val   Append a duplicate environment entry \"nm=val\" to environ\n\
   cmd         Optional command to run within the open session\n"
 
 #define DEFAULT_CMD "id"
@@ -50,6 +56,8 @@ struct program_opts {
     char host[1024];
     int test_session;
     int print_env;
+    char *print_vars[16];
+    int print_var_count;
     char **cmd;
 };
 
@@ -86,12 +94,34 @@ int main (int ac, char *av[])
     if (do_pam_setup (&pamh, opts) < 0)
         log_fatal ("PAM setup failed\n");
 
+    for (int i = 0; i < opts->print_var_count; i++) {
+        const char *val = getenv (opts->print_vars[i]);
+        printf ("%s=%s\n", opts->print_vars[i], val ? val : "(unset)");
+    }
+
     if (opts->cmd)
         run_session_cmd (opts);
 
     do_pam_end (pamh, opts);
 
     exit (0);
+}
+
+/*  Append entry to environ as is, so a name may appear twice.
+ */
+static void append_environ (char *entry)
+{
+    extern char **environ;
+    char **new;
+    int n = 0;
+
+    while (environ[n])
+        n++;
+    if (!(new = calloc (n + 2, sizeof (char *))))
+        log_fatal ("Out of memory\n");
+    memcpy (new, environ, n * sizeof (char *));
+    new[n] = entry;
+    environ = new;
 }
 
 void handle_args (struct program_opts *opt, int ac, char *av[])
@@ -111,6 +141,12 @@ void handle_args (struct program_opts *opt, int ac, char *av[])
         case 'S' : opt->test_session = 1;
                    break;
         case 'e' : opt->print_env = 1;
+                   break;
+        case 'E' : if (opt->print_var_count == 16)
+                       log_fatal ("Too many -E options\n");
+                   opt->print_vars[opt->print_var_count++] = optarg;
+                   break;
+        case 'D' : append_environ (optarg);
                    break;
         case 'h' :
         default  : usage (av[0]);
