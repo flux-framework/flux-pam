@@ -21,6 +21,7 @@
 #  include "config.h"
 #endif
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -68,6 +69,11 @@ struct options {
     /*  Directory for per-user lock files, default: /run/flux-pam
      */
     const char *lock_dir;
+
+    /*  URI of the Flux instance to query, from uri=URI. If NULL, libflux
+     *  connects to the system instance, since FLUX_URI is cleared.
+     */
+    const char *uri;
 };
 
 /*  Option defaults, shared by the account and session modules.
@@ -78,6 +84,165 @@ static const struct options default_options = {
     .scope_prefix = "flux-pam",
     .lock_dir = "/run/flux-pam",
 };
+
+/*  Return true if uri is local:// with an absolute path, no ".."
+ *  component, and no whitespace or control characters. A relative path
+ *  would resolve against the caller's cwd, and libflux trims trailing
+ *  whitespace from the path after this check.
+ */
+static bool valid_local_uri (const char *uri)
+{
+    size_t n = strlen (uri);
+
+    for (const char *p = uri; *p; p++) {
+        if (isspace ((unsigned char) *p) || iscntrl ((unsigned char) *p))
+            return false;
+    }
+    return strncmp (uri, "local:///", 9) == 0
+           && !strstr (uri, "/../")
+           && !(n >= 3 && strcmp (uri + n - 3, "/..") == 0);
+}
+
+/*  A Flux handle opened by pam_flux_open(), and the FLUX_* environment
+ *  entries, as "NAME=value", removed while it is open.
+ */
+struct pam_flux {
+    flux_t *h;
+    char **saved;
+    int count;
+    int size;
+    bool env_error;
+};
+
+/*  Grow saved[] by this many entries at a time. Few FLUX_* variables are
+ *  set at login, so this is usually allocated once.
+ */
+#define FLUX_ENV_CHUNK 16
+
+/*  Restore FLUX_* entries removed by flux_env_clear().
+ */
+static void flux_env_restore (pam_handle_t *pamh, struct pam_flux *pf)
+{
+    for (int i = 0; i < pf->count; i++) {
+        char *eq = strchr (pf->saved[i], '=');
+        *eq = '\0';
+        if (setenv (pf->saved[i], eq + 1, 1) < 0)
+            pam_syslog (pamh,
+                        LOG_ERR,
+                        "failed to restore %s: %m",
+                        pf->saved[i]);
+        free (pf->saved[i]);
+    }
+    free (pf->saved);
+    pf->saved = NULL;
+    pf->count = 0;
+    pf->size = 0;
+}
+
+/*  libflux reads FLUX_* variables with getenv(), some after flux_open()
+ *  returns. Unset them while a Flux handle is open, so the module always
+ *  uses the system install and system instance of Flux, whatever the
+ *  environment of the program that loaded it. They are restored afterward,
+ *  since the environment belongs to that program.
+ *  unsetenv() removes every entry with a name, so saving the first entry
+ *  found, then rescanning, saves what getenv() would return.
+ *  Only the live environ is restored: setenv() may build a new array, so
+ *  a copy of the old environ pointer, such as main()'s envp, keeps the
+ *  entries removed. Restored entries also move to the end of environ, and
+ *  only the first of duplicate entries is restored.
+ *  This reads and modifies environ without a lock, so it is not
+ *  thread-safe: another thread calling getenv(), setenv() or putenv()
+ *  meanwhile may race with it.
+ *  Return 0 on success, -1 on failure with the entries restored.
+ */
+static int flux_env_clear (pam_handle_t *pamh, struct pam_flux *pf)
+{
+    extern char **environ;
+
+    /*  Each pass finds the first remaining FLUX_* entry, saves it, and
+     *  unsets it. Scan from the start each time, since unsetenv() modifies
+     *  environ. The loop ends when no FLUX_* entry remains.
+     */
+    for (;;) {
+        char **e = environ;
+        char *eq;
+
+        /*  Find the first entry named FLUX_*. Skip entries without '=',
+         *  which are malformed and never returned by getenv(). unsetenv()
+         *  cannot remove them, so the rescan would find them forever.
+         */
+        while (e != NULL
+               && *e != NULL
+               && (strncmp (*e, "FLUX_", 5) != 0 || !strchr (*e, '=')))
+            e++;
+        if (!e || !*e)
+            return 0;
+        if (pf->count == pf->size) {
+            int size = pf->size + FLUX_ENV_CHUNK;
+            char **saved = realloc (pf->saved, size * sizeof (char *));
+            if (!saved)
+                goto error;
+            pf->saved = saved;
+            pf->size = size;
+        }
+        if (!(pf->saved[pf->count] = strdup (*e)))
+            goto error;
+
+        /*  Split "NAME=value" at '=' to pass NAME to unsetenv(), then put
+         *  '=' back so flux_env_restore() can split it again.
+         */
+        eq = strchr (pf->saved[pf->count], '=');
+        *eq = '\0';
+        if (unsetenv (pf->saved[pf->count++]) < 0) {
+            *eq = '=';
+            goto error;
+        }
+        *eq = '=';
+    }
+error:
+    pam_syslog (pamh, LOG_ERR, "failed to clear FLUX_* environment: %m");
+    flux_env_restore (pamh, pf);
+    return -1;
+}
+
+/*  Open a Flux handle to uri in pf->h with FLUX_* variables cleared, or
+ *  to the system instance if uri is NULL. Log a connection failure at
+ *  log_level. Return -1 on failure with the environment restored, and
+ *  pf->env_error set if the variables could not be cleared. After a
+ *  failure there is nothing to close. On success, call pam_flux_close()
+ *  when done.
+ */
+static int pam_flux_open (pam_handle_t *pamh,
+                          const char *uri,
+                          int log_level,
+                          struct pam_flux *pf)
+{
+    flux_error_t error;
+
+    if (flux_env_clear (pamh, pf) < 0) {
+        pf->env_error = true;
+        return -1;
+    }
+    if (!(pf->h = flux_open_ex (uri, 0, &error))) {
+        pam_syslog (pamh,
+                    log_level,
+                    "Unable to connect to Flux at %s: %s",
+                    uri ? uri : "the system instance",
+                    error.text);
+        flux_env_restore (pamh, pf);
+        return -1;
+    }
+    return 0;
+}
+
+/*  Close the handle from pam_flux_open() and restore FLUX_* variables.
+ */
+static void pam_flux_close (pam_handle_t *pamh, struct pam_flux *pf)
+{
+    flux_close (pf->h);
+    pf->h = NULL;
+    flux_env_restore (pamh, pf);
+}
 
 static char *uri_to_local (const char *uri)
 {
@@ -108,7 +273,7 @@ static char *uri_to_local (const char *uri)
 static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
 {
     int allowed = 0;
-    flux_t *h = NULL;
+    struct pam_flux pf = { 0 };
     flux_future_t *f = NULL;
     char *local_uri = NULL;
 
@@ -122,11 +287,9 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
                     uri);
         goto out;
     }
-    if (!(h = flux_open (local_uri, 0))) {
-        pam_syslog (pamh, LOG_ERR, "flux_open (%s): %m", local_uri);
+    if (pam_flux_open (pamh, local_uri, LOG_ERR, &pf) < 0)
         goto out;
-    }
-    if (!(f = flux_rpc (h, "config.get", NULL, FLUX_NODEID_ANY, 0))
+    if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
         || flux_rpc_get_unpack (f,
                                 "{s?{s?b}}",
                                 "access",
@@ -140,7 +303,7 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
                     "access.allow-guest-user not enabled in child");
 out:
     flux_future_destroy (f);
-    flux_close (h);
+    pam_flux_close (pamh, &pf);
     free (local_uri);
     return allowed;
 }
@@ -149,6 +312,7 @@ typedef enum {
     FLUX_AUTH_DENIED    = 0,
     FLUX_AUTH_JOB_OWNER = 1,  /* uid has a direct active job on this node */
     FLUX_AUTH_GUEST     = 2,  /* uid is a guest of the instance owner's job */
+    FLUX_AUTH_ERROR     = 3,  /* the check could not be made */
 } flux_auth_t;
 
 /* Loop over jobs in json array 'jobs'.
@@ -235,7 +399,8 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
 {
     flux_auth_t authorized = FLUX_AUTH_DENIED;
     json_t *jobs = NULL;
-    flux_t *h = NULL;
+    struct pam_flux pf = { 0 };
+    flux_t *h;
     unsigned int rank = -1;
     char rankstr[16];
     flux_future_t *f = NULL;
@@ -247,10 +412,9 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
      */
     uid_t allow_if_user = uid;
 
-    if (!(h = flux_open (NULL, 0))) {
-        pam_syslog (pamh, connect_log_level, "Unable to connect to Flux: %m");
-        return FLUX_AUTH_DENIED;
-    }
+    if (pam_flux_open (pamh, opts->uri, connect_log_level, &pf) < 0)
+        return pf.env_error ? FLUX_AUTH_ERROR : FLUX_AUTH_DENIED;
+    h = pf.h;
     if (flux_get_rank (h, &rank) < 0) {
         pam_syslog (pamh, LOG_ERR, "Failed to get current broker rank: %m");
         goto out;
@@ -297,7 +461,7 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
 
 out:
     flux_future_destroy (f);
-    flux_close (h);
+    pam_flux_close (pamh, &pf);
     return authorized;
 }
 
@@ -411,6 +575,20 @@ static int parse_options (pam_handle_t *pamh,
         }
         else if (strncmp ("lock-dir=", argv[i], 9) == 0) {
             opts->lock_dir = argv[i] + 9;
+        }
+        else if (strncmp ("uri=", argv[i], 4) == 0) {
+            opts->uri = argv[i] + 4;
+            /*  Allow only the builtin local connector, since other schemes
+             *  require loading a connector from disk.
+             */
+            if (!valid_local_uri (opts->uri)) {
+                pam_syslog (pamh,
+                            LOG_ERR,
+                            "uri=%s: must be local:// with an absolute path,"
+                            " no '..', and no whitespace",
+                            opts->uri);
+                return -1;
+            }
         }
         else {
             pam_syslog (pamh,
@@ -719,40 +897,39 @@ static void user_lock_release (int fd)
  *  read, which callers treat as "no uid matches".
  */
 static int check_pam_manage_user_slice (pam_handle_t *pamh,
+                                        const char *uri,
                                         int *resultp,
                                         uid_t *ownerp)
 {
-    flux_t *h = NULL;
+    struct pam_flux pf = { 0 };
     flux_future_t *f = NULL;
+    int rc = -1;
 
     *resultp = 0;
     *ownerp = (uid_t) -1;
 
     /* Connect to Flux and fetch config
      */
-    if (!(h = flux_open (NULL, 0))) {
-        pam_syslog (pamh, LOG_ERR, "failed to connect to Flux: %m");
-        return -1;
-    }
+    if (pam_flux_open (pamh, uri, LOG_ERR, &pf) < 0)
+        goto out;
 
-    *ownerp = attr_get_uid (h, "security.owner");
+    *ownerp = attr_get_uid (pf.h, "security.owner");
 
     /*  Fetch broker config via RPC (not cached handle config).
      */
-    if (!(f = flux_rpc (h, "config.get", NULL, FLUX_NODEID_ANY, 0))
+    if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
         || flux_rpc_get_unpack (f,
                                 "{s?:{s?:b}}",
                                 "pam",
                                 "manage-user-slice", resultp) < 0) {
         pam_syslog (pamh, LOG_ERR, "failed to fetch broker config: %m");
-        flux_future_destroy (f);
-        flux_close (h);
-        return -1;
+        goto out;
     }
+    rc = 0;
+out:
     flux_future_destroy (f);
-    flux_close (h);
-
-    return 0;
+    pam_flux_close (pamh, &pf);
+    return rc;
 }
 
 /*  Return true if this PAM transaction is for the systemd-user service.
@@ -793,6 +970,8 @@ static int systemd_user_acct_mgmt (pam_handle_t *pamh,
                                    struct options *opts,
                                    uid_t uid)
 {
+    flux_auth_t result;
+
     /*  Admit if the active marker exists and the user lock is held.
      *  The prolog creates the marker, then holds the lock while it starts
      *  user@UID.service, before job-list may show the new job.
@@ -833,7 +1012,8 @@ static int systemd_user_acct_mgmt (pam_handle_t *pamh,
      *  the instance owner's user manager before the broker, so do not log
      *  that as an error.
      */
-    if (flux_check_user (pamh, opts, uid, LOG_DEBUG) != FLUX_AUTH_DENIED) {
+    result = flux_check_user (pamh, opts, uid, LOG_DEBUG);
+    if (result == FLUX_AUTH_JOB_OWNER || result == FLUX_AUTH_GUEST) {
         if (opts->debug)
             pam_syslog (pamh,
                         LOG_INFO,
@@ -868,6 +1048,8 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
         return systemd_user_acct_mgmt (pamh, &opts, uid);
 
     result = flux_check_user (pamh, &opts, uid, LOG_ERR);
+    if (result == FLUX_AUTH_ERROR)
+        return PAM_SYSTEM_ERR;
     if (result != FLUX_AUTH_DENIED) {
         /*  User has a local job or allow-guest-user is true. In either case
          *  return PAM_SUCCESS:
@@ -989,7 +1171,7 @@ pam_sm_open_session (pam_handle_t *pamh,
     if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_SESSION_ERR;
 
-    if (check_pam_manage_user_slice (pamh, &manage_slice, &owner) < 0)
+    if (check_pam_manage_user_slice (pamh, opts.uri, &manage_slice, &owner) < 0)
         return PAM_SESSION_ERR;
 
     /*  Skip attach to user slice if pam.manage-user-slice not set

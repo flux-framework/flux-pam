@@ -82,7 +82,7 @@ export FLUX_PAM_LOCK_DIR=$(pwd)
 test_systemd_user_lock ${TEST_UID}
 
 pamtest_session() {
-	sudo FLUX_URI=${FLUX_URI} \
+	sudo \
 	LD_PRELOAD=libpam_wrapper.so \
 	PAM_WRAPPER=1 \
 	PAM_WRAPPER_DEBUGLEVEL=2 \
@@ -114,8 +114,8 @@ test_expect_success 'create PAM stack' '
 	cat <<-EOF >pam-session-test
 	auth    required   pam_localuser.so
 	account sufficient pam_succeed_if.so uid < 500
-	account sufficient ${PAM_FLUX_PATH}
-	session requisite  ${PAM_FLUX_PATH} debug scope-prefix=flux-pam-test lock-dir=$(pwd)
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI}
+	session requisite  ${PAM_FLUX_PATH} uri=${FLUX_URI} debug scope-prefix=flux-pam-test lock-dir=$(pwd)
 	session required   pam_unix.so
 	EOF
 '
@@ -205,8 +205,8 @@ test_expect_success 'lock-dir-perms: create PAM stack with bad lock-dir' '
 	cat <<-EOF >pam-session-badlock
 	auth    required   pam_localuser.so
 	account sufficient pam_succeed_if.so uid < 500
-	account sufficient ${PAM_FLUX_PATH}
-	session requisite  ${PAM_FLUX_PATH} debug scope-prefix=flux-pam-test lock-dir=$(pwd)/bad-lock-dir
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI}
+	session requisite  ${PAM_FLUX_PATH} uri=${FLUX_URI} debug scope-prefix=flux-pam-test lock-dir=$(pwd)/bad-lock-dir
 	session required   pam_unix.so
 	EOF
 '
@@ -219,7 +219,7 @@ test_expect_success 'lock-dir-perms: create marker' '
 '
 test_expect_success 'lock-dir-perms: session fails with group-writable dir' '
 	test_must_fail \
-		sudo FLUX_URI=${FLUX_URI} \
+		sudo \
 		LD_PRELOAD=libpam_wrapper.so \
 		PAM_WRAPPER=1 \
 		PAM_WRAPPER_DEBUGLEVEL=2 \
@@ -244,8 +244,8 @@ test_expect_success 'lock-dir-perms: update PAM stack with other-writable dir' '
 	cat <<-EOF >pam-session-badlock2
 	auth    required   pam_localuser.so
 	account sufficient pam_succeed_if.so uid < 500
-	account sufficient ${PAM_FLUX_PATH}
-	session requisite  ${PAM_FLUX_PATH} debug scope-prefix=flux-pam-test lock-dir=$(pwd)/bad-lock-dir2
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI}
+	session requisite  ${PAM_FLUX_PATH} uri=${FLUX_URI} debug scope-prefix=flux-pam-test lock-dir=$(pwd)/bad-lock-dir2
 	session required   pam_unix.so
 	EOF
 '
@@ -258,7 +258,7 @@ test_expect_success 'lock-dir-perms: recreate marker' '
 '
 test_expect_success 'lock-dir-perms: session fails with other-writable dir' '
 	test_must_fail \
-		sudo FLUX_URI=${FLUX_URI} \
+		sudo \
 		LD_PRELOAD=libpam_wrapper.so \
 		PAM_WRAPPER=1 \
 		PAM_WRAPPER_DEBUGLEVEL=2 \
@@ -279,9 +279,9 @@ test_expect_success 'systemd-user: create PAM stack' '
 	cat <<-EOF >systemd-user
 	auth    required   pam_localuser.so
 	account sufficient pam_succeed_if.so uid < 500
-	account sufficient ${PAM_FLUX_PATH}
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI}
 	account required   pam_deny.so
-	session requisite  ${PAM_FLUX_PATH} debug
+	session requisite  ${PAM_FLUX_PATH} uri=${FLUX_URI} debug
 	session required   pam_unix.so
 	EOF
 '
@@ -290,7 +290,7 @@ test_expect_success 'systemd-user: submit test job' '
 	flux job wait-event $jobid start
 '
 test_expect_success 'systemd-user: session skips systemd-user service' '
-	sudo FLUX_URI=${FLUX_URI} \
+	sudo \
 	LD_PRELOAD=libpam_wrapper.so \
 	PAM_WRAPPER=1 \
 	PAM_WRAPPER_DEBUGLEVEL=2 \

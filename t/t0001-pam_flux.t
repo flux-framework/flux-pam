@@ -37,20 +37,24 @@ pamtest() {
 	pamtest_service pam-test "$@"
 }
 
+#  Run pamtest on RANK with a copy of the pam-test stack that points
+#  pam_flux at the local URI of that rank.
 pamtest_on_rank() {
 	RANK=$1
 	shift
+	uri=$(flux exec -r ${RANK} flux getattr local-uri) &&
+	sed "s|uri=${FLUX_URI}|uri=${uri}|" pam-test >pam-test-rank${RANK} &&
 	LD_PRELOAD=libpam_wrapper.so \
 	PAM_WRAPPER=1 \
 	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
-	flux exec -r ${RANK} ${PAMTEST} -v -s pam-test "$@"
+	flux exec -r ${RANK} ${PAMTEST} -v -s pam-test-rank${RANK} "$@"
 }
 
 test_expect_success 'pam_flux: create pam-test PAM stack' '
 	cat <<-EOF >pam-test
 	auth    required   pam_localuser.so
 
-	account required ${PAM_FLUX_PATH}
+	account required ${PAM_FLUX_PATH} uri=${FLUX_URI}
 	EOF
 '
 test_expect_success 'pam_flux: module denies access with no jobs running' '
@@ -69,8 +73,11 @@ test_expect_success 'pam_flux: module denies access after job terminates' '
 	test_must_fail pamtest -u ${USER}
 '
 test_expect_success 'pam_flux: module denies access on flux_open() failure' '
-	( export FLUX_URI=/tmp/foo &&
-	  test_must_fail pamtest -u ${USER} )
+	cat <<-EOF >pam-test-nouri &&
+	auth    required   pam_localuser.so
+	account required ${PAM_FLUX_PATH} uri=local:///nonexistent/local
+	EOF
+	test_must_fail pamtest_service pam-test-nouri -u ${USER}
 '
 test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	cat <<-EOF >config/epilog.toml &&
@@ -89,7 +96,7 @@ test_expect_success 'pam_flux: module denies access during CLEANUP' '
 test_expect_success 'add allow-guest-user to pam_flux module options' '
 	cat <<-EOF >pam-test
 	auth    required   pam_localuser.so
-	account required ${PAM_FLUX_PATH} allow-guest-user
+	account required ${PAM_FLUX_PATH} uri=${FLUX_URI} allow-guest-user
 	EOF
 '
 test_expect_success 'pam_flux: module denies access with allow-guest-access' '
@@ -174,7 +181,7 @@ test_expect_success 'pam_flux: create systemd-user stack with pam_permit' '
 	cat <<-EOF >systemd-user
 	auth    required   pam_localuser.so
 	account required   pam_permit.so
-	account required   ${PAM_FLUX_PATH} debug lock-dir=${LOCK_DIR}
+	account required   ${PAM_FLUX_PATH} uri=${FLUX_URI} debug lock-dir=${LOCK_DIR}
 	EOF
 '
 test_expect_success 'pam_flux: systemd-user ignores user with no job' '
@@ -184,16 +191,19 @@ test_expect_success 'pam_flux: systemd-user ignores user with no job' '
 	test_must_fail grep "Access denied" su-nojob.out
 '
 test_expect_success 'pam_flux: systemd-user ignores user if Flux is unreachable' '
-	(FLUX_URI=local:///nonexistent/local &&
-	 export FLUX_URI &&
-	 pamtest_systemd_user -u ${USER} >su-nouri.out 2>&1) &&
+	cat <<-EOF >systemd-user &&
+	auth    required   pam_localuser.so
+	account required   pam_permit.so
+	account required   ${PAM_FLUX_PATH} uri=local:///nonexistent/local debug lock-dir=${LOCK_DIR}
+	EOF
+	pamtest_systemd_user -u ${USER} >su-nouri.out 2>&1 &&
 	test_debug "cat su-nouri.out" &&
 	grep "no active job for uid=${MY_UID}, ignoring" su-nouri.out
 '
 test_expect_success 'pam_flux: create systemd-user stack ending in pam_deny' '
 	cat <<-EOF >systemd-user
 	auth    required   pam_localuser.so
-	account sufficient ${PAM_FLUX_PATH} debug lock-dir=${LOCK_DIR}
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI} debug lock-dir=${LOCK_DIR}
 	account required   pam_deny.so
 	EOF
 '
@@ -260,7 +270,7 @@ test_expect_success FLOCK 'pam_flux: systemd-user ignores marker in symlinked lo
 	ln -s ${LOCK_DIR} lock-dir-link &&
 	cat <<-EOF >systemd-user &&
 	auth    required   pam_localuser.so
-	account sufficient ${PAM_FLUX_PATH} debug lock-dir=$(pwd)/lock-dir-link
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI} debug lock-dir=$(pwd)/lock-dir-link
 	account required   pam_deny.so
 	EOF
 	test_must_fail pamtest_systemd_user_locked -u ${USER} >su-marker5.out 2>&1 &&
@@ -270,7 +280,7 @@ test_expect_success FLOCK 'pam_flux: systemd-user ignores marker in symlinked lo
 test_expect_success 'pam_flux: systemd-user uses /run/flux-pam by default' '
 	cat <<-EOF >systemd-user &&
 	auth    required   pam_localuser.so
-	account sufficient ${PAM_FLUX_PATH} debug
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI} debug
 	account required   pam_deny.so
 	EOF
 	test_must_fail pamtest_systemd_user -u ${USER} >su-default.out 2>&1 &&
