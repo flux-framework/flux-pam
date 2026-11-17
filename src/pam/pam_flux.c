@@ -691,7 +691,9 @@ static int user_lock_acquire (pam_handle_t *pamh,
         pam_syslog (pamh, LOG_ERR, "lock path overflow for uid=%u", uid);
         return -1;
     }
-    if ((fd = open (path, O_CREAT | O_RDWR | O_NOFOLLOW, 0600)) < 0) {
+    if ((fd = open (path,
+                    O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
+                    0600)) < 0) {
         pam_syslog (pamh, LOG_ERR, "open lock uid=%u: %m", uid);
         return -1;
     }
