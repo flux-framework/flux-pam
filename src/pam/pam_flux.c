@@ -70,6 +70,15 @@ struct options {
     const char *lock_dir;
 };
 
+/*  Option defaults, shared by the account and session modules.
+ */
+static const struct options default_options = {
+    .allow_guest_user = false,
+    .debug = false,
+    .scope_prefix = "flux-pam",
+    .lock_dir = "/run/flux-pam",
+};
+
 static char *uri_to_local (const char *uri)
 {
     char *local_uri = NULL;
@@ -689,7 +698,7 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
     uid_t uid;
     int auth = PAM_PERM_DENIED;
     flux_auth_t result;
-    struct options opts = { .allow_guest_user = false };
+    struct options opts = default_options;
 
     if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_USER_UNKNOWN;
@@ -777,12 +786,7 @@ pam_sm_open_session (pam_handle_t *pamh,
     const void *pam_flux_authorized = NULL;
     int manage_slice;
     uid_t owner;
-    struct options opts = {
-        .allow_guest_user = false,
-        .debug = false,
-        .scope_prefix = "flux-pam",
-        .lock_dir = "/run/flux-pam"
-    };
+    struct options opts = default_options;
 
     if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SESSION_ERR;
