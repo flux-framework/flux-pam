@@ -448,6 +448,29 @@ static int check_lock_dir (pam_handle_t *pamh, const char *lock_dir)
     return 0;
 }
 
+/*  Verify the lock directory is owned by root or by the caller's
+ *  effective uid. systemd runs the systemd-user stack as root, so there
+ *  this requires root. A caller trusting a directory it owns itself gains
+ *  nothing, and allowing it lets the tests run without root.
+ *  Returns 0 if the owner is acceptable, -1 otherwise.
+ */
+static int check_lock_dir_owner (pam_handle_t *pamh, const char *lock_dir)
+{
+    struct stat st;
+
+    if (lstat (lock_dir, &st) < 0) {
+        pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+        return -1;
+    }
+    if (st.st_uid != 0 && st.st_uid != geteuid ()) {
+        pam_syslog (pamh, LOG_ERR,
+                    "lock dir %s must be owned by root (owner uid=%u)",
+                    lock_dir, (unsigned int) st.st_uid);
+        return -1;
+    }
+    return 0;
+}
+
 /*  Check the per-user active marker created by the Flux prolog. Its presence,
  *  read under the user lock, is the single source of truth that the user has
  *  an active job on the node with containment set up. The prolog creates it
@@ -770,8 +793,9 @@ static int systemd_user_acct_mgmt (pam_handle_t *pamh,
      *  This is safe because:
      *
      *  - Only root can create the marker or open the lock file: the lock
-     *    dir must not be group or other writable, the marker must be a
-     *    regular file, and the lock file must not be a symlink.
+     *    dir must be owned by root and not group or other writable, the
+     *    marker must be a regular file, and the lock file must not be a
+     *    symlink.
      *
      *  - A stale marker is never trusted alone. A crashed prolog or
      *    housekeeping holds no lock, because the kernel releases a flock
@@ -788,6 +812,7 @@ static int systemd_user_acct_mgmt (pam_handle_t *pamh,
      */
     if (check_active_marker (pamh, uid, opts->lock_dir, opts->debug) == 0
         && check_lock_dir (pamh, opts->lock_dir) == 0
+        && check_lock_dir_owner (pamh, opts->lock_dir) == 0
         && user_lock_is_held (pamh, uid, opts->lock_dir)) {
         if (opts->debug)
             pam_syslog (pamh,
