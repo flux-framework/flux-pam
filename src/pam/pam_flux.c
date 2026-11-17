@@ -229,7 +229,8 @@ static uid_t attr_get_uid (flux_t *h, const char *name)
  */
 static flux_auth_t flux_check_user (pam_handle_t *pamh,
                                     struct options *opts,
-                                    uid_t uid)
+                                    uid_t uid,
+                                    int connect_log_level)
 {
     flux_auth_t authorized = FLUX_AUTH_DENIED;
     json_t *jobs = NULL;
@@ -246,7 +247,7 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
     uid_t allow_if_user = uid;
 
     if (!(h = flux_open (NULL, 0))) {
-        pam_syslog (pamh, LOG_ERR, "Unable to connect to Flux: %m");
+        pam_syslog (pamh, connect_log_level, "Unable to connect to Flux: %m");
         return FLUX_AUTH_DENIED;
     }
     if (flux_get_rank (h, &rank) < 0) {
@@ -717,7 +718,7 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
         return PAM_IGNORE;
     }
 
-    result = flux_check_user (pamh, &opts, uid);
+    result = flux_check_user (pamh, &opts, uid, LOG_ERR);
     if (result != FLUX_AUTH_DENIED) {
         /*  User has a local job or allow-guest-user is true. In either case
          *  return PAM_SUCCESS:
