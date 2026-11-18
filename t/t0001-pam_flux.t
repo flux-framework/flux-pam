@@ -15,6 +15,12 @@ if ! test -x ${PAMTEST}; then
 fi
 
 mkdir config
+#  Allow root to connect, as for a system instance, so pamtest can run
+#  as root.
+cat >config/access.toml <<EOF
+[access]
+allow-root-owner = true
+EOF
 test_under_flux 2 full -o,--config-path=$(pwd)/config
 
 #  Check for libpam_wrapper.so
@@ -140,6 +146,45 @@ test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	flux jobs -o "{id.f58}: {state}" &&
 	flux event pub pam-test-done &&
 	flux job wait-event -vt 15 ${jobid} clean
+'
+#  pam_flux runs as root in programs such as su. Check that the module can
+#  connect and deny there. sudo resets the environment, so pass the
+#  PAM wrapper settings explicitly.
+test_expect_success SUDO 'pam_flux: module denies user with no job when run as root' '
+	test_must_fail sudo env \
+		LD_PRELOAD=libpam_wrapper.so \
+		PAM_WRAPPER=1 \
+		PAM_WRAPPER_DEBUGLEVEL=2 \
+		PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+		${PAMTEST} -v -s pam-test -u ${USER} >root-nojob.out 2>&1 &&
+	test_debug "cat root-nojob.out" &&
+	test_must_fail grep "Unable to connect" root-nojob.out &&
+	grep "Access denied: user ${USER}" root-nojob.out
+'
+#  FLUX_LOCAL_CONNECTOR_RETRY_COUNT=bogus makes flux_open() of a local://
+#  URI fail, and FLUX_HANDLE_TRACE=1 traces messages to stderr, so a job
+#  user is admitted without a trace only if pam_flux removed them. The
+#  duplicate entry added with -D follows the first, which getenv() returns,
+#  so the first must be the one restored. Export in a subshell, since in
+#  some shells an assignment before a function call persists after it.
+test_expect_success 'pam_flux: module ignores FLUX_* environment variables' '
+	jobid=$(flux submit --wait-event=alloc sleep 300) &&
+	test_when_finished "flux cancel $jobid" &&
+	(export FLUX_URI=local:///nonexistent/local &&
+	 export FLUX_LOCAL_CONNECTOR_RETRY_COUNT=bogus &&
+	 export FLUX_HANDLE_TRACE=1 &&
+	 export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 pamtest -u ${USER} \
+		-E FLUX_URI -E FLUX_LOCAL_CONNECTOR_RETRY_COUNT \
+		-D FLUX_LOCAL_CONNECTOR_RETRY_COUNT=second \
+		>flux-env.out 2>&1) &&
+	test_debug "cat flux-env.out" &&
+	grep "pam_acct_mgmt rc=0" flux-env.out &&
+	test_must_fail grep "job-list.list" flux-env.out
+'
+test_expect_success 'pam_flux: module restores FLUX_* environment variables' '
+	grep "^FLUX_URI=local:///nonexistent/local$" flux-env.out &&
+	grep "^FLUX_LOCAL_CONNECTOR_RETRY_COUNT=bogus$" flux-env.out
 '
 test_expect_success 'add allow-guest-user to pam_flux module options' '
 	write_account_stack pam-test uri=${FLUX_URI} allow-guest-user
