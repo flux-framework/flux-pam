@@ -13,6 +13,7 @@
 import errno
 import fcntl
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -45,8 +46,14 @@ def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
     # Create lock directory if it doesn't exist
     os.makedirs(lock_dir, mode=0o700, exist_ok=True)
 
-    # Verify directory is only writable by root (defense in depth)
-    st = os.stat(lock_dir)
+    # Verify lock_dir is a directory, not a symlink, and is only writable
+    # by its owner. This matches check_lock_dir() in pam_flux.so, so the
+    # prolog and the session module accept the same lock directories.
+    st = os.lstat(lock_dir)
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(
+            errno.ENOTDIR, f"Lock directory {lock_dir} is not a directory"
+        )
     if st.st_mode & 0o022:  # Check if group or other writable
         raise OSError(
             errno.EPERM,
