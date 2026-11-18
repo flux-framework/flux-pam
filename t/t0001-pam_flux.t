@@ -33,6 +33,16 @@ pamtest_service() {
 	${PAMTEST} -v -s ${service} "$@"
 }
 
+#  Write PAM stack FILE with a pam_flux account line using module ARGS.
+write_account_stack() {
+	file=$1
+	shift
+	cat <<-EOF >$file
+	auth    required   pam_localuser.so
+	account required ${PAM_FLUX_PATH} $*
+	EOF
+}
+
 pamtest() {
 	pamtest_service pam-test "$@"
 }
@@ -51,11 +61,7 @@ pamtest_on_rank() {
 }
 
 test_expect_success 'pam_flux: create pam-test PAM stack' '
-	cat <<-EOF >pam-test
-	auth    required   pam_localuser.so
-
-	account required ${PAM_FLUX_PATH} uri=${FLUX_URI}
-	EOF
+	write_account_stack pam-test uri=${FLUX_URI}
 '
 test_expect_success 'pam_flux: module denies access with no jobs running' '
 	test_must_fail pamtest -u ${USER} 
@@ -73,11 +79,53 @@ test_expect_success 'pam_flux: module denies access after job terminates' '
 	test_must_fail pamtest -u ${USER}
 '
 test_expect_success 'pam_flux: module denies access on flux_open() failure' '
-	cat <<-EOF >pam-test-nouri &&
-	auth    required   pam_localuser.so
-	account required ${PAM_FLUX_PATH} uri=local:///nonexistent/local
-	EOF
-	test_must_fail pamtest_service pam-test-nouri -u ${USER}
+	write_account_stack pam-test-nouri uri=local:///nonexistent/local &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest_service pam-test-nouri -u ${USER} \
+		>nouri.out 2>&1) &&
+	test_debug "cat nouri.out" &&
+	grep "Unable to connect to Flux at local:///nonexistent/local" nouri.out
+'
+#  Without uri=, pam_flux connects to the system instance, not FLUX_URI.
+#  The test user has no job there, so access is denied either way, and
+#  if no system instance runs here, the error names the system instance.
+test_expect_success 'pam_flux: module ignores FLUX_URI in the environment' '
+	write_account_stack pam-test-default &&
+	(export FLUX_URI=local:///nonexistent/local &&
+	 export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest_service pam-test-default -u ${USER} \
+		>default-uri.out 2>&1) &&
+	test_debug "cat default-uri.out" &&
+	grep "Access denied: user ${USER}" default-uri.out &&
+	test_must_fail grep nonexistent default-uri.out &&
+	if grep "Unable to connect" default-uri.out; then
+		grep "Unable to connect to Flux at the system instance" \
+			default-uri.out
+	fi
+'
+#  $1 is the whole module argument, so a URI with whitespace can use
+#  PAM bracket syntax, e.g. "[uri=local:///run/.. ]".
+test_pam_flux_bad_uri() {
+	write_account_stack pam-test-baduri "$1" &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest_service pam-test-baduri -u ${USER} \
+		>bad-uri.out 2>&1) &&
+	test_debug "cat bad-uri.out" &&
+	grep "must be local:// with an absolute path" bad-uri.out
+}
+test_expect_success 'pam_flux: module rejects a uri that is not local://' '
+	test_pam_flux_bad_uri uri=ssh://localhost/tmp/local
+'
+test_expect_success 'pam_flux: module rejects a relative local:// uri' '
+	test_pam_flux_bad_uri uri=local://run/flux/local
+'
+test_expect_success 'pam_flux: module rejects a local:// uri with ..' '
+	test_pam_flux_bad_uri uri=local:///run/../tmp/local &&
+	test_pam_flux_bad_uri uri=local:///run/flux/..
+'
+test_expect_success 'pam_flux: module rejects a local:// uri with whitespace' '
+	test_pam_flux_bad_uri "[uri=local:///run/.. ]" &&
+	test_pam_flux_bad_uri "[uri=local:///run/flux local]"
 '
 test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	cat <<-EOF >config/epilog.toml &&
@@ -94,10 +142,7 @@ test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	flux job wait-event -vt 15 ${jobid} clean
 '
 test_expect_success 'add allow-guest-user to pam_flux module options' '
-	cat <<-EOF >pam-test
-	auth    required   pam_localuser.so
-	account required ${PAM_FLUX_PATH} uri=${FLUX_URI} allow-guest-user
-	EOF
+	write_account_stack pam-test uri=${FLUX_URI} allow-guest-user
 '
 test_expect_success 'pam_flux: module denies access with allow-guest-access' '
 	test_must_fail pamtest -u ${USER} 2>allow-guest.err &&
