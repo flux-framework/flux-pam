@@ -5,7 +5,7 @@ pam_flux(8)
 SYNOPSIS
 ========
 
-  :command:`pam_flux.so` [allow-guest-user] [scope-prefix=PREFIX] [lock-dir=DIR] [debug]
+  :command:`pam_flux.so` [allow-guest-user] [scope-prefix=PREFIX] [lock-dir=DIR] [uri=URI] [debug]
 
 DESCRIPTION
 ===========
@@ -127,6 +127,17 @@ lock-dir=DIR
 
 Common Options
 --------------
+
+uri=URI
+  Connect to the Flux instance at ``URI``, which must be a ``local://``
+  URI with an absolute path, no ``..`` component, and no whitespace.
+  (Default: the system instance of the installed flux-core).
+
+  The module should always use the system install and system instance
+  of Flux, so while it calls Flux it removes all ``FLUX_*`` variables
+  from the environment, and restores them afterward. ``FLUX_URI`` is
+  therefore never used, and another instance can only be selected with
+  ``uri``. This should rarely be needed except for testing.
 
 debug
   Enable additional logging. For account management, logs successful grants
