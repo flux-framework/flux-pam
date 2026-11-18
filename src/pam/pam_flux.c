@@ -211,6 +211,11 @@ static uid_t attr_get_uid (flux_t *h, const char *name)
 }
 
 
+/*  Timeout in seconds for the job-list query. A wedged job-list module
+ *  would otherwise hang logins and user manager starts indefinitely.
+ */
+#define JOB_LIST_TIMEOUT 5.0
+
 /*  get jobs in RUN state on this node for user(s) of interest:
  */
 static flux_auth_t flux_check_user (pam_handle_t *pamh,
@@ -270,7 +275,9 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
                          "userid", uid, allow_if_user,
                          "ranks", rankstr,
                          "states", FLUX_JOB_STATE_RUN);
-    if (!f || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
+    if (!f
+        || flux_future_wait_for (f, JOB_LIST_TIMEOUT) < 0
+        || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
         pam_syslog (pamh, LOG_ERR, "flux_job_list: %m");
         goto out;
     }
