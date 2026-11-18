@@ -13,8 +13,7 @@ RUN \
    && sudo usermod -G wheel fluxuser ; \
  fi
 
-RUN sudo yum -y update \
- && sudo dnf -y install pam-devel pam_wrapper
+RUN sudo dnf -y install pam-devel pam_wrapper
 
 USER $USER
 WORKDIR /home/$USER

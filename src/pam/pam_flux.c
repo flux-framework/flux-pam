@@ -70,6 +70,15 @@ struct options {
     const char *lock_dir;
 };
 
+/*  Option defaults, shared by the account and session modules.
+ */
+static const struct options default_options = {
+    .allow_guest_user = false,
+    .debug = false,
+    .scope_prefix = "flux-pam",
+    .lock_dir = "/run/flux-pam",
+};
+
 static char *uri_to_local (const char *uri)
 {
     char *local_uri = NULL;
@@ -211,11 +220,17 @@ static uid_t attr_get_uid (flux_t *h, const char *name)
 }
 
 
+/*  Timeout in seconds for the job-list query. A wedged job-list module
+ *  would otherwise hang logins and user manager starts indefinitely.
+ */
+#define JOB_LIST_TIMEOUT 5.0
+
 /*  get jobs in RUN state on this node for user(s) of interest:
  */
 static flux_auth_t flux_check_user (pam_handle_t *pamh,
                                     struct options *opts,
-                                    uid_t uid)
+                                    uid_t uid,
+                                    int connect_log_level)
 {
     flux_auth_t authorized = FLUX_AUTH_DENIED;
     json_t *jobs = NULL;
@@ -232,7 +247,7 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
     uid_t allow_if_user = uid;
 
     if (!(h = flux_open (NULL, 0))) {
-        pam_syslog (pamh, LOG_ERR, "Unable to connect to Flux: %m");
+        pam_syslog (pamh, connect_log_level, "Unable to connect to Flux: %m");
         return FLUX_AUTH_DENIED;
     }
     if (flux_get_rank (h, &rank) < 0) {
@@ -270,7 +285,9 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
                          "userid", uid, allow_if_user,
                          "ranks", rankstr,
                          "states", FLUX_JOB_STATE_RUN);
-    if (!f || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
+    if (!f
+        || flux_future_wait_for (f, JOB_LIST_TIMEOUT) < 0
+        || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
         pam_syslog (pamh, LOG_ERR, "flux_job_list: %m");
         goto out;
     }
@@ -405,7 +422,58 @@ static int parse_options (pam_handle_t *pamh,
     return 0;
 }
 
-#ifdef HAVE_LIBSYSTEMD
+/*  Lock dir, active marker, and user lock helpers. These use only POSIX
+ *  calls, so the systemd-user account check works without libsystemd.
+ */
+
+/*  Verify the lock directory is a directory, not a symlink, and not group
+ *  or other writable, so that only its owner can create lock or marker
+ *  files in it.
+ *  Returns 0 if the directory is acceptable, -1 otherwise.
+ */
+static int check_lock_dir (pam_handle_t *pamh, const char *lock_dir)
+{
+    struct stat st;
+
+    if (lstat (lock_dir, &st) < 0) {
+        pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+        return -1;
+    }
+    if (!S_ISDIR (st.st_mode)) {
+        pam_syslog (pamh, LOG_ERR, "lock dir %s is not a directory", lock_dir);
+        return -1;
+    }
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) {
+        pam_syslog (pamh, LOG_ERR,
+                    "lock dir %s must not be group/other writable (mode=%04o)",
+                    lock_dir, st.st_mode & 0777);
+        return -1;
+    }
+    return 0;
+}
+
+/*  Verify the lock directory is owned by root or by the caller's
+ *  effective uid. systemd runs the systemd-user stack as root, so there
+ *  this requires root. A caller trusting a directory it owns itself gains
+ *  nothing, and allowing it lets the tests run without root.
+ *  Returns 0 if the owner is acceptable, -1 otherwise.
+ */
+static int check_lock_dir_owner (pam_handle_t *pamh, const char *lock_dir)
+{
+    struct stat st;
+
+    if (lstat (lock_dir, &st) < 0) {
+        pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+        return -1;
+    }
+    if (st.st_uid != 0 && st.st_uid != geteuid ()) {
+        pam_syslog (pamh, LOG_ERR,
+                    "lock dir %s must be owned by root (owner uid=%u)",
+                    lock_dir, (unsigned int) st.st_uid);
+        return -1;
+    }
+    return 0;
+}
 
 /*  Check the per-user active marker created by the Flux prolog. Its presence,
  *  read under the user lock, is the single source of truth that the user has
@@ -434,7 +502,7 @@ static int check_active_marker (pam_handle_t *pamh,
      */
     if (lstat (path, &st) < 0) {
         if (debug)
-            pam_syslog (pamh, LOG_INFO, "no active marker for uid %u", uid);
+            pam_syslog (pamh, LOG_INFO, "no active marker %s", path);
         return -1;
     }
     if (!S_ISREG (st.st_mode)) {
@@ -443,9 +511,41 @@ static int check_active_marker (pam_handle_t *pamh,
         return -1;
     }
     if (debug)
-        pam_syslog (pamh, LOG_INFO, "active marker present for uid %u", uid);
+        pam_syslog (pamh, LOG_INFO, "active marker present %s", path);
     return 0;
 }
+
+/*  Return true if another process holds the per-user lock for uid.
+ *  Never blocks. Returns false if the lock is free or cannot be checked.
+ */
+static bool user_lock_is_held (pam_handle_t *pamh,
+                               uid_t uid,
+                               const char *lock_dir)
+{
+    char path[PATH_MAX];
+    bool held = false;
+    int fd;
+
+    if (snprintf (path, sizeof (path), "%s/uid.%u.lock", lock_dir, uid)
+        >= sizeof (path)) {
+        pam_syslog (pamh, LOG_ERR, "lock path overflow for uid=%u", uid);
+        return false;
+    }
+    /*  No O_CREAT: if the lock file does not exist, nobody holds it.
+     */
+    if ((fd = open (path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)) < 0)
+        return false;
+    if (flock (fd, LOCK_EX | LOCK_NB) < 0) {
+        if (errno == EWOULDBLOCK)
+            held = true;
+        else
+            pam_syslog (pamh, LOG_ERR, "flock uid=%u: %m", uid);
+    }
+    close (fd);
+    return held;
+}
+
+#ifdef HAVE_LIBSYSTEMD
 
 /*  Create a transient scope under user-$UID.slice for the login session.
  *  Scope name: flux-pam-<pid>.scope
@@ -581,27 +681,19 @@ static int user_lock_acquire (pam_handle_t *pamh,
                               const char *lock_dir)
 {
     char path[PATH_MAX];
-    struct stat st;
     int fd;
 
-    /* Verify lock directory is only writable by root */
-    if (stat (lock_dir, &st) < 0) {
-        pam_syslog (pamh, LOG_ERR, "stat lock dir %s: %m", lock_dir);
+    if (check_lock_dir (pamh, lock_dir) < 0)
         return -1;
-    }
-    if (st.st_mode & (S_IWGRP | S_IWOTH)) {
-        pam_syslog (pamh, LOG_ERR,
-                    "lock dir %s must not be group/other writable (mode=%04o)",
-                    lock_dir, st.st_mode & 0777);
-        return -1;
-    }
 
     if (snprintf (path, sizeof (path), "%s/uid.%u.lock", lock_dir, uid)
         >= sizeof (path)) {
         pam_syslog (pamh, LOG_ERR, "lock path overflow for uid=%u", uid);
         return -1;
     }
-    if ((fd = open (path, O_CREAT | O_RDWR | O_NOFOLLOW, 0600)) < 0) {
+    if ((fd = open (path,
+                    O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
+                    0600)) < 0) {
         pam_syslog (pamh, LOG_ERR, "open lock uid=%u: %m", uid);
         return -1;
     }
@@ -662,15 +754,108 @@ static int check_pam_manage_user_slice (pam_handle_t *pamh,
     return 0;
 }
 
+/*  Return true if this PAM transaction is for the systemd-user service.
+ */
+static bool is_systemd_user_service (pam_handle_t *pamh)
+{
+    const char *service = NULL;
+
+    if (pam_get_item (pamh, PAM_SERVICE, (const void **) &service)
+            != PAM_SUCCESS)
+        return false;
+    return service && strcmp (service, "systemd-user") == 0;
+}
+
+/*  Account management for the systemd-user service.
+ *
+ *  systemd runs the systemd-user stack to start user@UID.service, for
+ *  example from the prolog, from logind for a login, or for linger. A user
+ *  may be able to trigger it, e.g. with "loginctl enable-linger", so
+ *  admission here depends only on whether the user has a job on the node.
+ *
+ *  For systemd-user, this module only admits job users and never denies:
+ *
+ *  - PAM_SUCCESS if the user has an active job on this node, so that the
+ *    user manager can start even if the stack ends in pam_deny.so.
+ *
+ *  - PAM_IGNORE otherwise, including when Flux is unreachable. The rest of
+ *    the stack decides, exactly as if pam_flux.so were absent. Denying here
+ *    instead would break the user manager of the Flux instance owner, which
+ *    flux.service starts before the broker is running, and of any other
+ *    lingering service account. The module cannot tell those accounts apart
+ *    from other users without the broker.
+ *
+ *  Since it never denies, the only effect pam_flux.so has on this stack is
+ *  to let a job user's manager start when a later module would deny it.
+ */
+static int systemd_user_acct_mgmt (pam_handle_t *pamh,
+                                   struct options *opts,
+                                   uid_t uid)
+{
+    /*  Admit if the active marker exists and the user lock is held.
+     *  The prolog creates the marker, then holds the lock while it starts
+     *  user@UID.service, before job-list may show the new job.
+     *
+     *  This is safe because:
+     *
+     *  - Only root can create the marker or open the lock file: the lock
+     *    dir must be a root-owned directory that is not group or other
+     *    writable, the marker must be a regular file, and the lock file
+     *    must not be a symlink.
+     *
+     *  - A stale marker is never trusted alone. A crashed prolog or
+     *    housekeeping holds no lock, because the kernel releases a flock
+     *    when its holder exits.
+     *
+     *  - Other lock holders are harmless: housekeeping clears the marker
+     *    and stops user@UID.service under the lock, and the session module
+     *    takes the lock only for a user who has passed the job check.
+     *
+     *  The marker is checked first so that nodes without a lock dir, where
+     *  pam.manage-user-slice is disabled, do not log a lock dir error.
+     *  The lock is tested without waiting, because the prolog holds it
+     *  until user@UID.service has started.
+     */
+    if (check_active_marker (pamh, uid, opts->lock_dir, opts->debug) == 0
+        && check_lock_dir (pamh, opts->lock_dir) == 0
+        && check_lock_dir_owner (pamh, opts->lock_dir) == 0
+        && user_lock_is_held (pamh, uid, opts->lock_dir)) {
+        if (opts->debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "systemd-user: admitting uid=%u with active marker",
+                        uid);
+        return PAM_SUCCESS;
+    }
+    /*  Otherwise ask Flux whether the user has a running job here.
+     *  Flux is expected to be unreachable at boot, when flux.service starts
+     *  the instance owner's user manager before the broker, so do not log
+     *  that as an error.
+     */
+    if (flux_check_user (pamh, opts, uid, LOG_DEBUG) != FLUX_AUTH_DENIED) {
+        if (opts->debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "systemd-user: admitting uid=%u with active job",
+                        uid);
+        return PAM_SUCCESS;
+    }
+    if (opts->debug)
+        pam_syslog (pamh,
+                    LOG_INFO,
+                    "systemd-user: no active job for uid=%u, ignoring",
+                    uid);
+    return PAM_IGNORE;
+}
+
 PAM_EXTERN int
 pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
     const char *user;
-    const char *service = NULL;
     uid_t uid;
     int auth = PAM_PERM_DENIED;
     flux_auth_t result;
-    struct options opts = { .allow_guest_user = false };
+    struct options opts = default_options;
 
     if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_USER_UNKNOWN;
@@ -678,18 +863,10 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
     if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SYSTEM_ERR;
 
-    /*  Skip systemd-user service - it's starting user@UID.service itself.
-     *  Checking the slice from within that service's own startup is circular
-     *  and not meaningful.
-     */
-    pam_get_item (pamh, PAM_SERVICE, (const void **) &service);
-    if (service && strcmp (service, "systemd-user") == 0) {
-        if (opts.debug)
-            pam_syslog (pamh, LOG_INFO, "skipping for systemd-user service");
-        return PAM_IGNORE;
-    }
+    if (is_systemd_user_service (pamh))
+        return systemd_user_acct_mgmt (pamh, &opts, uid);
 
-    result = flux_check_user (pamh, &opts, uid);
+    result = flux_check_user (pamh, &opts, uid, LOG_ERR);
     if (result != FLUX_AUTH_DENIED) {
         /*  User has a local job or allow-guest-user is true. In either case
          *  return PAM_SUCCESS:
@@ -758,19 +935,14 @@ pam_sm_open_session (pam_handle_t *pamh,
     const void *pam_flux_authorized = NULL;
     int manage_slice;
     uid_t owner;
-    struct options opts = {
-        .allow_guest_user = false,
-        .debug = false,
-        .scope_prefix = "flux-pam",
-        .lock_dir = "/run/flux-pam"
-    };
+    struct options opts = default_options;
 
     if (parse_options (pamh, &opts, argc, argv) < 0)
         return PAM_SESSION_ERR;
 
-    /*  Skip systemd-user service - it's starting user@UID.service itself.
-     *  Creating a scope under user-UID.slice from within that service's own
-     *  startup is circular and not meaningful.
+    /*  systemd-user is the service systemd uses to start user@UID.service.
+     *  Skip it: the user manager belongs in its service, not a login scope,
+     *  and the prolog holds the user lock while it waits for the start.
      */
     pam_get_item (pamh, PAM_SERVICE, (const void **) &service);
     if (service && strcmp (service, "systemd-user") == 0) {

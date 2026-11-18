@@ -24,11 +24,17 @@ if grep -i error ld_preload.out >/dev/null 2>&1; then
 	test_done
 fi
 
-pamtest() {
+pamtest_service() {
+	service=$1
+	shift
 	LD_PRELOAD=libpam_wrapper.so \
 	PAM_WRAPPER=1 \
 	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
-	${PAMTEST} -v -s pam-test "$@"
+	${PAMTEST} -v -s ${service} "$@"
+}
+
+pamtest() {
+	pamtest_service pam-test "$@"
 }
 
 pamtest_on_rank() {
@@ -131,32 +137,144 @@ test_expect_success 'pam_flux: access denied if not rank 0 of job' '
 	flux cancel $id &&
 	flux job wait-event -vt 15 $id clean
 '
-test_expect_success 'pam_flux: create systemd-user PAM stack' '
+#  The account module never denies for systemd-user: it admits users with
+#  an active job or active marker, and otherwise returns PAM_IGNORE so the
+#  rest of the stack decides. Run with debug and PAM_WRAPPER_DEBUGLEVEL=2 so
+#  the module's syslog messages show which path was taken.
+pamtest_systemd_user() {
+	LD_PRELOAD=libpam_wrapper.so \
+	PAM_WRAPPER=1 \
+	PAM_WRAPPER_DEBUGLEVEL=2 \
+	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+	${PAMTEST} -v -s systemd-user "$@"
+}
+
+#  Run pamtest for systemd-user while holding the user lock, as the prolog
+#  does while it starts user@UID.service.
+pamtest_systemd_user_locked() {
+	flock ${LOCK_DIR}/uid.${MY_UID}.lock \
+		env LD_PRELOAD=libpam_wrapper.so \
+		PAM_WRAPPER=1 \
+		PAM_WRAPPER_DEBUGLEVEL=2 \
+		PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+		${PAMTEST} -v -s systemd-user "$@"
+}
+
+if command -v flock >/dev/null; then
+	test_set_prereq FLOCK
+fi
+
+MY_UID=$(id -u)
+LOCK_DIR=$(pwd)/systemd-user-lock
+
+test_expect_success 'pam_flux: create systemd-user lock dir' '
+	mkdir -m 0700 ${LOCK_DIR}
+'
+test_expect_success 'pam_flux: create systemd-user stack with pam_permit' '
 	cat <<-EOF >systemd-user
 	auth    required   pam_localuser.so
-	account required   ${PAM_FLUX_PATH} debug
 	account required   pam_permit.so
+	account required   ${PAM_FLUX_PATH} debug lock-dir=${LOCK_DIR}
 	EOF
 '
-test_expect_success 'pam_flux: module skips systemd-user service (no job)' '
-	LD_PRELOAD=libpam_wrapper.so \
-	PAM_WRAPPER=1 \
-	PAM_WRAPPER_DEBUGLEVEL=2 \
-	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
-	${PAMTEST} -v -s systemd-user -u ${USER} >systemd-user.out 2>&1 &&
-	test_debug "cat systemd-user.out" &&
-	grep "skipping for systemd-user service" systemd-user.out
+test_expect_success 'pam_flux: systemd-user ignores user with no job' '
+	pamtest_systemd_user -u ${USER} >su-nojob.out 2>&1 &&
+	test_debug "cat su-nojob.out" &&
+	grep "no active job for uid=${MY_UID}, ignoring" su-nojob.out &&
+	test_must_fail grep "Access denied" su-nojob.out
 '
-test_expect_success 'pam_flux: module skips systemd-user service (with job)' '
+test_expect_success 'pam_flux: systemd-user ignores user if Flux is unreachable' '
+	(FLUX_URI=local:///nonexistent/local &&
+	 export FLUX_URI &&
+	 pamtest_systemd_user -u ${USER} >su-nouri.out 2>&1) &&
+	test_debug "cat su-nouri.out" &&
+	grep "no active job for uid=${MY_UID}, ignoring" su-nouri.out
+'
+test_expect_success 'pam_flux: create systemd-user stack ending in pam_deny' '
+	cat <<-EOF >systemd-user
+	auth    required   pam_localuser.so
+	account sufficient ${PAM_FLUX_PATH} debug lock-dir=${LOCK_DIR}
+	account required   pam_deny.so
+	EOF
+'
+test_expect_success 'pam_flux: systemd-user with pam_deny denies user with no job' '
+	test_must_fail pamtest_systemd_user -u ${USER} >su-deny.out 2>&1 &&
+	test_debug "cat su-deny.out" &&
+	grep "no active job for uid=${MY_UID}, ignoring" su-deny.out
+'
+test_expect_success 'pam_flux: systemd-user with pam_deny admits user with a job' '
 	jobid=$(flux submit --wait-event=alloc sleep 300) &&
-	LD_PRELOAD=libpam_wrapper.so \
-	PAM_WRAPPER=1 \
-	PAM_WRAPPER_DEBUGLEVEL=2 \
-	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
-	${PAMTEST} -v -s systemd-user -u ${USER} >systemd-user2.out 2>&1 &&
-	test_debug "cat systemd-user2.out" &&
-	grep "skipping for systemd-user service" systemd-user2.out &&
+	pamtest_systemd_user -u ${USER} >su-job.out 2>&1 &&
+	test_debug "cat su-job.out" &&
+	grep "admitting uid=${MY_UID} with active job" su-job.out
+'
+test_expect_success 'pam_flux: systemd-user does not admit another user' '
+	test_must_fail pamtest_systemd_user -u nobody >su-nobody.out 2>&1 &&
+	test_debug "cat su-nobody.out" &&
+	grep "ignoring" su-nobody.out &&
 	flux cancel $jobid &&
 	flux job wait-event -vt 15 $jobid free
+'
+test_expect_success FLOCK 'pam_flux: systemd-user ignores stale marker with no lock file' '
+	touch ${LOCK_DIR}/uid.${MY_UID}.active &&
+	test_must_fail test -e ${LOCK_DIR}/uid.${MY_UID}.lock &&
+	test_must_fail pamtest_systemd_user -u ${USER} >su-stale.out 2>&1 &&
+	test_debug "cat su-stale.out" &&
+	grep "no active job for uid=${MY_UID}, ignoring" su-stale.out
+'
+test_expect_success FLOCK 'pam_flux: systemd-user admits marker while lock is held' '
+	pamtest_systemd_user_locked -u ${USER} >su-marker.out 2>&1 &&
+	test_debug "cat su-marker.out" &&
+	grep "admitting uid=${MY_UID} with active marker" su-marker.out
+'
+test_expect_success FLOCK 'pam_flux: systemd-user ignores stale marker with unlocked lock file' '
+	test -f ${LOCK_DIR}/uid.${MY_UID}.lock &&
+	test_must_fail pamtest_systemd_user -u ${USER} >su-stale2.out 2>&1 &&
+	test_debug "cat su-stale2.out" &&
+	grep "no active job for uid=${MY_UID}, ignoring" su-stale2.out
+'
+test_expect_success FLOCK 'pam_flux: systemd-user ignores marker of another user' '
+	test_must_fail pamtest_systemd_user_locked -u nobody >su-marker2.out 2>&1 &&
+	test_debug "cat su-marker2.out" &&
+	grep "ignoring" su-marker2.out
+'
+test_expect_success FLOCK 'pam_flux: systemd-user ignores marker in group-writable lock dir' '
+	chmod 0770 ${LOCK_DIR} &&
+	test_must_fail pamtest_systemd_user_locked -u ${USER} >su-marker3.out 2>&1 &&
+	test_debug "cat su-marker3.out" &&
+	grep "must not be group/other writable" su-marker3.out &&
+	grep "no active job for uid=${MY_UID}, ignoring" su-marker3.out
+'
+test_expect_success FLOCK 'pam_flux: systemd-user ignores marker that is a symlink' '
+	chmod 0700 ${LOCK_DIR} &&
+	rm ${LOCK_DIR}/uid.${MY_UID}.active &&
+	touch marker-target &&
+	ln -s $(pwd)/marker-target ${LOCK_DIR}/uid.${MY_UID}.active &&
+	test_must_fail pamtest_systemd_user_locked -u ${USER} >su-marker4.out 2>&1 &&
+	test_debug "cat su-marker4.out" &&
+	grep "is not a regular file" su-marker4.out
+'
+test_expect_success FLOCK 'pam_flux: systemd-user ignores marker in symlinked lock dir' '
+	rm ${LOCK_DIR}/uid.${MY_UID}.active &&
+	touch ${LOCK_DIR}/uid.${MY_UID}.active &&
+	ln -s ${LOCK_DIR} lock-dir-link &&
+	cat <<-EOF >systemd-user &&
+	auth    required   pam_localuser.so
+	account sufficient ${PAM_FLUX_PATH} debug lock-dir=$(pwd)/lock-dir-link
+	account required   pam_deny.so
+	EOF
+	test_must_fail pamtest_systemd_user_locked -u ${USER} >su-marker5.out 2>&1 &&
+	test_debug "cat su-marker5.out" &&
+	grep "is not a directory" su-marker5.out
+'
+test_expect_success 'pam_flux: systemd-user uses /run/flux-pam by default' '
+	cat <<-EOF >systemd-user &&
+	auth    required   pam_localuser.so
+	account sufficient ${PAM_FLUX_PATH} debug
+	account required   pam_deny.so
+	EOF
+	test_must_fail pamtest_systemd_user -u ${USER} >su-default.out 2>&1 &&
+	test_debug "cat su-default.out" &&
+	grep "/run/flux-pam/uid.${MY_UID}.active" su-default.out
 '
 test_done

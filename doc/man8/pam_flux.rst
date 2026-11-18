@@ -116,8 +116,9 @@ scope-prefix=PREFIX
   Scopes are named ``PREFIX-PID.scope``. (Default: ``flux-pam``).
 
 lock-dir=DIR
-  Directory for per-user lock files used to serialize session setup with
-  the prolog and housekeeping scripts. The directory must exist, be owned
+  Directory for per-user lock files and active markers, shared with the
+  prolog and housekeeping scripts. Used by the session module and by the
+  account module for ``systemd-user``. The directory must exist, be owned
   by root, and have permissions ``0700`` (owner read/write/execute only).
   If the directory has group or other write permissions, lock acquisition
   will fail with an error. The directory is created with correct permissions
@@ -176,14 +177,37 @@ NOTES
 systemd-user Service
 --------------------
 
-``pam_flux.so`` returns ``PAM_IGNORE`` when ``PAM_SERVICE`` is
-``systemd-user`` (the PAM stack systemd uses to start ``user@$UID.service``).
-This avoids placing the user manager itself in a flux-pam scope.
+Each user can have a systemd user manager (``systemd --user``), which
+provides ``systemctl --user``, user timers, and the user D-Bus. It runs
+as the system service ``user@$UID.service``. With ``pam.manage-user-slice``
+enabled, the flux-pam prolog starts it when a job starts on the node, and
+housekeeping stops it after the user's last job (see :man5:`flux-config-pam`).
 
-In practice, ``pam_flux.so`` should not normally appear in
-``/etc/pam.d/systemd-user`` anyway. However, if your site uses shared PAM
-includes (e.g., ``include common-account``) that bring ``pam_flux.so`` into
-the systemd-user stack, this automatic skip ensures correct behavior.
+To start the user manager, systemd runs the PAM configuration for the
+``systemd-user`` service (see :linux:man5:`pam.d`). On many systems this
+configuration includes a shared one, such as ``password-auth`` or
+``common-account``, and so may include ``pam_flux.so``.
+
+Account
+  The account stack must admit job users, or the user manager fails to
+  start. For ``systemd-user``, the ``pam_flux.so`` account module admits
+  users with an active job on the node, and never denies anyone. While
+  the prolog starts the user manager, it admits on the prolog's active
+  marker, since Flux may not yet report the new job. For all other
+  users, including when Flux is unreachable, it returns ``PAM_IGNORE``,
+  and the rest of the stack decides as if ``pam_flux.so`` were not
+  present.
+
+  If the stack ends in ``pam_deny.so``, it must also admit service
+  accounts that need a user manager, such as the Flux instance owner.
+
+Session
+  The ``pam_flux.so`` session module returns ``PAM_IGNORE`` for
+  ``systemd-user`` without creating a scope, so the rest of the session
+  runs normally. For a login, it moves the login process into a new
+  scope, ``flux-pam-<pid>.scope`` (see Session Management).  Doing that
+  for the user manager would move it out of ``user@$UID.service``, where
+  systemd expects it.
 
 /proc with hidepid
 ------------------
@@ -297,6 +321,17 @@ Login admitted but not contained
   The user was admitted by another account module, or is a guest or the
   instance owner (see Session Management). Also check that
   ``pam_systemd.so`` is not in the session stack.
+
+``user@UID.service`` fails to start
+  Jobs and logins still work, but ``systemctl --user`` does not. Check
+  ``journalctl -u user@UID.service``. A PAM failure there, such as
+  "Failed to set up PAM session", means the ``systemd-user`` stack denies
+  the user (see systemd-user Service). ``pam_flux.so`` never denies for
+  ``systemd-user``, so for a job user, check that ``pam_flux.so`` is in the
+  account stack before any module that denies. For the Flux instance owner
+  or another service account, check that the stack admits the account
+  before it reaches ``pam_deny.so``. On nodes with ``hidepid=2``, see
+  /proc with hidepid.
 
 RESOURCES
 =========

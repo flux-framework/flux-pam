@@ -141,6 +141,10 @@ session  required    pam_unix.so
 > conflict with Flux's job-driven slice management. See
 > [pam_flux(8)](doc/man8/pam_flux.rst) for details.
 
+> **Note:** The `systemd-user` PAM stack, which systemd uses to start
+> `user@UID.service`, must admit job users. See systemd-user Service in
+> [pam_flux(8)](doc/man8/pam_flux.rst).
+
 ### Flux system configuration
 
 Enable slice lifecycle management and, optionally, resource constraints:

@@ -280,7 +280,7 @@ test_expect_success 'systemd-user: create PAM stack' '
 	auth    required   pam_localuser.so
 	account sufficient pam_succeed_if.so uid < 500
 	account sufficient ${PAM_FLUX_PATH}
-	account required   pam_permit.so
+	account required   pam_deny.so
 	session requisite  ${PAM_FLUX_PATH} debug
 	session required   pam_unix.so
 	EOF
