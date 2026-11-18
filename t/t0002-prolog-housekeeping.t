@@ -527,6 +527,24 @@ test_expect_success 'lock-dir-perms: undrain rank after second failure' '
 test_expect_success 'lock-dir-perms: restore correct permissions for cleanup' '
 	chmod 0700 ${FLUX_PAM_LOCK_DIR}
 '
+test_expect_success 'lock-dir-symlink: replace lock dir with a symlink' '
+	mv ${FLUX_PAM_LOCK_DIR} ${FLUX_PAM_LOCK_DIR}.real &&
+	ln -s ${FLUX_PAM_LOCK_DIR}.real ${FLUX_PAM_LOCK_DIR}
+'
+test_expect_success 'lock-dir-symlink: prolog fails with symlinked dir' '
+	jobid=$(submit_as_guest 5m --requires="rank:0" sleep 300) &&
+	echo $jobid > jobid.symlink &&
+	test_expect_code 1 flux job wait-event -t 10s $jobid start
+'
+test_expect_success 'lock-dir-symlink: verify error message in logs' '
+	jobid=$(cat jobid.symlink) &&
+	flux dmesg | grep "$jobid" | grep "is not a directory"
+'
+test_expect_success 'lock-dir-symlink: undrain rank and restore lock dir' '
+	flux resource undrain -u 0 &&
+	rm ${FLUX_PAM_LOCK_DIR} &&
+	mv ${FLUX_PAM_LOCK_DIR}.real ${FLUX_PAM_LOCK_DIR}
+'
 test_expect_success 'remove sdexec-mapper' '
 	flux module remove sdexec-mapper
 '
