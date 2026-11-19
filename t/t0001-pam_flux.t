@@ -15,6 +15,12 @@ if ! test -x ${PAMTEST}; then
 fi
 
 mkdir config
+#  Allow root to connect, as for a system instance, so pamtest can run
+#  as root.
+cat >config/access.toml <<EOF
+[access]
+allow-root-owner = true
+EOF
 test_under_flux 2 full -o,--config-path=$(pwd)/config
 
 #  Check for libpam_wrapper.so
@@ -33,25 +39,35 @@ pamtest_service() {
 	${PAMTEST} -v -s ${service} "$@"
 }
 
+#  Write PAM stack FILE with a pam_flux account line using module ARGS.
+write_account_stack() {
+	file=$1
+	shift
+	cat <<-EOF >$file
+	auth    required   pam_localuser.so
+	account required ${PAM_FLUX_PATH} $*
+	EOF
+}
+
 pamtest() {
 	pamtest_service pam-test "$@"
 }
 
+#  Run pamtest on RANK with a copy of the pam-test stack that points
+#  pam_flux at the local URI of that rank.
 pamtest_on_rank() {
 	RANK=$1
 	shift
+	uri=$(flux exec -r ${RANK} flux getattr local-uri) &&
+	sed "s|uri=${FLUX_URI}|uri=${uri}|" pam-test >pam-test-rank${RANK} &&
 	LD_PRELOAD=libpam_wrapper.so \
 	PAM_WRAPPER=1 \
 	PAM_WRAPPER_SERVICE_DIR=$(pwd) \
-	flux exec -r ${RANK} ${PAMTEST} -v -s pam-test "$@"
+	flux exec -r ${RANK} ${PAMTEST} -v -s pam-test-rank${RANK} "$@"
 }
 
 test_expect_success 'pam_flux: create pam-test PAM stack' '
-	cat <<-EOF >pam-test
-	auth    required   pam_localuser.so
-
-	account required ${PAM_FLUX_PATH}
-	EOF
+	write_account_stack pam-test uri=${FLUX_URI}
 '
 test_expect_success 'pam_flux: module denies access with no jobs running' '
 	test_must_fail pamtest -u ${USER} 
@@ -69,8 +85,53 @@ test_expect_success 'pam_flux: module denies access after job terminates' '
 	test_must_fail pamtest -u ${USER}
 '
 test_expect_success 'pam_flux: module denies access on flux_open() failure' '
-	( export FLUX_URI=/tmp/foo &&
-	  test_must_fail pamtest -u ${USER} )
+	write_account_stack pam-test-nouri uri=local:///nonexistent/local &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest_service pam-test-nouri -u ${USER} \
+		>nouri.out 2>&1) &&
+	test_debug "cat nouri.out" &&
+	grep "Unable to connect to Flux at local:///nonexistent/local" nouri.out
+'
+#  Without uri=, pam_flux connects to the system instance, not FLUX_URI.
+#  The test user has no job there, so access is denied either way, and
+#  if no system instance runs here, the error names the system instance.
+test_expect_success 'pam_flux: module ignores FLUX_URI in the environment' '
+	write_account_stack pam-test-default &&
+	(export FLUX_URI=local:///nonexistent/local &&
+	 export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest_service pam-test-default -u ${USER} \
+		>default-uri.out 2>&1) &&
+	test_debug "cat default-uri.out" &&
+	grep "Access denied: user ${USER}" default-uri.out &&
+	test_must_fail grep nonexistent default-uri.out &&
+	if grep "Unable to connect" default-uri.out; then
+		grep "Unable to connect to Flux at the system instance" \
+			default-uri.out
+	fi
+'
+#  $1 is the whole module argument, so a URI with whitespace can use
+#  PAM bracket syntax, e.g. "[uri=local:///run/.. ]".
+test_pam_flux_bad_uri() {
+	write_account_stack pam-test-baduri "$1" &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest_service pam-test-baduri -u ${USER} \
+		>bad-uri.out 2>&1) &&
+	test_debug "cat bad-uri.out" &&
+	grep "must be local:// with an absolute path" bad-uri.out
+}
+test_expect_success 'pam_flux: module rejects a uri that is not local://' '
+	test_pam_flux_bad_uri uri=ssh://localhost/tmp/local
+'
+test_expect_success 'pam_flux: module rejects a relative local:// uri' '
+	test_pam_flux_bad_uri uri=local://run/flux/local
+'
+test_expect_success 'pam_flux: module rejects a local:// uri with ..' '
+	test_pam_flux_bad_uri uri=local:///run/../tmp/local &&
+	test_pam_flux_bad_uri uri=local:///run/flux/..
+'
+test_expect_success 'pam_flux: module rejects a local:// uri with whitespace' '
+	test_pam_flux_bad_uri "[uri=local:///run/.. ]" &&
+	test_pam_flux_bad_uri "[uri=local:///run/flux local]"
 '
 test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	cat <<-EOF >config/epilog.toml &&
@@ -86,11 +147,47 @@ test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	flux event pub pam-test-done &&
 	flux job wait-event -vt 15 ${jobid} clean
 '
+#  pam_flux runs as root in programs such as su. Check that the module can
+#  connect and deny there. sudo resets the environment, so pass the
+#  PAM wrapper settings explicitly.
+test_expect_success SUDO 'pam_flux: module denies user with no job when run as root' '
+	test_must_fail sudo env \
+		LD_PRELOAD=libpam_wrapper.so \
+		PAM_WRAPPER=1 \
+		PAM_WRAPPER_DEBUGLEVEL=2 \
+		PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+		${PAMTEST} -v -s pam-test -u ${USER} >root-nojob.out 2>&1 &&
+	test_debug "cat root-nojob.out" &&
+	test_must_fail grep "Unable to connect" root-nojob.out &&
+	grep "Access denied: user ${USER}" root-nojob.out
+'
+#  FLUX_LOCAL_CONNECTOR_RETRY_COUNT=bogus makes flux_open() of a local://
+#  URI fail, and FLUX_HANDLE_TRACE=1 traces messages to stderr, so a job
+#  user is admitted without a trace only if pam_flux removed them. The
+#  duplicate entry added with -D follows the first, which getenv() returns,
+#  so the first must be the one restored. Export in a subshell, since in
+#  some shells an assignment before a function call persists after it.
+test_expect_success 'pam_flux: module ignores FLUX_* environment variables' '
+	jobid=$(flux submit --wait-event=alloc sleep 300) &&
+	test_when_finished "flux cancel $jobid" &&
+	(export FLUX_URI=local:///nonexistent/local &&
+	 export FLUX_LOCAL_CONNECTOR_RETRY_COUNT=bogus &&
+	 export FLUX_HANDLE_TRACE=1 &&
+	 export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 pamtest -u ${USER} \
+		-E FLUX_URI -E FLUX_LOCAL_CONNECTOR_RETRY_COUNT \
+		-D FLUX_LOCAL_CONNECTOR_RETRY_COUNT=second \
+		>flux-env.out 2>&1) &&
+	test_debug "cat flux-env.out" &&
+	grep "pam_acct_mgmt rc=0" flux-env.out &&
+	test_must_fail grep "job-list.list" flux-env.out
+'
+test_expect_success 'pam_flux: module restores FLUX_* environment variables' '
+	grep "^FLUX_URI=local:///nonexistent/local$" flux-env.out &&
+	grep "^FLUX_LOCAL_CONNECTOR_RETRY_COUNT=bogus$" flux-env.out
+'
 test_expect_success 'add allow-guest-user to pam_flux module options' '
-	cat <<-EOF >pam-test
-	auth    required   pam_localuser.so
-	account required ${PAM_FLUX_PATH} allow-guest-user
-	EOF
+	write_account_stack pam-test uri=${FLUX_URI} allow-guest-user
 '
 test_expect_success 'pam_flux: module denies access with allow-guest-access' '
 	test_must_fail pamtest -u ${USER} 2>allow-guest.err &&
@@ -174,7 +271,7 @@ test_expect_success 'pam_flux: create systemd-user stack with pam_permit' '
 	cat <<-EOF >systemd-user
 	auth    required   pam_localuser.so
 	account required   pam_permit.so
-	account required   ${PAM_FLUX_PATH} debug lock-dir=${LOCK_DIR}
+	account required   ${PAM_FLUX_PATH} uri=${FLUX_URI} debug lock-dir=${LOCK_DIR}
 	EOF
 '
 test_expect_success 'pam_flux: systemd-user ignores user with no job' '
@@ -184,16 +281,19 @@ test_expect_success 'pam_flux: systemd-user ignores user with no job' '
 	test_must_fail grep "Access denied" su-nojob.out
 '
 test_expect_success 'pam_flux: systemd-user ignores user if Flux is unreachable' '
-	(FLUX_URI=local:///nonexistent/local &&
-	 export FLUX_URI &&
-	 pamtest_systemd_user -u ${USER} >su-nouri.out 2>&1) &&
+	cat <<-EOF >systemd-user &&
+	auth    required   pam_localuser.so
+	account required   pam_permit.so
+	account required   ${PAM_FLUX_PATH} uri=local:///nonexistent/local debug lock-dir=${LOCK_DIR}
+	EOF
+	pamtest_systemd_user -u ${USER} >su-nouri.out 2>&1 &&
 	test_debug "cat su-nouri.out" &&
 	grep "no active job for uid=${MY_UID}, ignoring" su-nouri.out
 '
 test_expect_success 'pam_flux: create systemd-user stack ending in pam_deny' '
 	cat <<-EOF >systemd-user
 	auth    required   pam_localuser.so
-	account sufficient ${PAM_FLUX_PATH} debug lock-dir=${LOCK_DIR}
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI} debug lock-dir=${LOCK_DIR}
 	account required   pam_deny.so
 	EOF
 '
@@ -260,7 +360,7 @@ test_expect_success FLOCK 'pam_flux: systemd-user ignores marker in symlinked lo
 	ln -s ${LOCK_DIR} lock-dir-link &&
 	cat <<-EOF >systemd-user &&
 	auth    required   pam_localuser.so
-	account sufficient ${PAM_FLUX_PATH} debug lock-dir=$(pwd)/lock-dir-link
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI} debug lock-dir=$(pwd)/lock-dir-link
 	account required   pam_deny.so
 	EOF
 	test_must_fail pamtest_systemd_user_locked -u ${USER} >su-marker5.out 2>&1 &&
@@ -270,7 +370,7 @@ test_expect_success FLOCK 'pam_flux: systemd-user ignores marker in symlinked lo
 test_expect_success 'pam_flux: systemd-user uses /run/flux-pam by default' '
 	cat <<-EOF >systemd-user &&
 	auth    required   pam_localuser.so
-	account sufficient ${PAM_FLUX_PATH} debug
+	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI} debug
 	account required   pam_deny.so
 	EOF
 	test_must_fail pamtest_systemd_user -u ${USER} >su-default.out 2>&1 &&
