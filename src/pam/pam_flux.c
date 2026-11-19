@@ -139,6 +139,7 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
                     LOG_INFO,
                     "access.allow-guest-user not enabled in child");
 out:
+    flux_future_destroy (f);
     flux_close (h);
     free (local_uri);
     return allowed;
