@@ -579,27 +579,23 @@ class PAMHelper:
         """
         Check for orphan processes in user slice.
 
-        Orphans are processes in user-$UID.slice that are not under
-        user@$UID.service (e.g., leftover SSH sessions or other scopes).
+        Orphans are any processes left in user-$UID.slice when the user's
+        last job ends, including those under user@$UID.service (e.g.,
+        leftover SSH sessions, other scopes, or units started with
+        systemd-run --user), since that service may have failed to stop.
 
         Returns:
             List of orphan process descriptions, or empty list if none
         """
         slice_path = f"/sys/fs/cgroup/user.slice/user-{self.userid}.slice"
-        service_path = f"{slice_path}/user@{self.userid}.service"
 
         # Check if slice exists
         if not os.path.exists(slice_path):
             return []
 
         orphans = []
-        # Walk the slice cgroup looking for non-service processes
+        # Walk the slice cgroup looking for processes
         for root, dirs, files in os.walk(slice_path):
-            # Skip the user@.service subtree: the path itself and what is
-            # below it, rather than every path its name is a prefix of.
-            if root == service_path or root.startswith(service_path + "/"):
-                continue
-
             # Check for processes in this cgroup
             procs_file = os.path.join(root, "cgroup.procs")
             if os.path.exists(procs_file):
