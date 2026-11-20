@@ -104,6 +104,10 @@ allow-guest-user
    - the job is an instance of Flux
    - ``access.allow-guest-user`` is set to ``true`` in the instance
      configuration
+   - the instance's ``local`` socket, named by the job's ``uri``
+     annotation, is a socket owned by the job owner
+
+  pam_flux connects to that socket with the job owner's credentials.
 
   Guests admitted this way are not placed in a slice by the session
   module. See Session Management.
