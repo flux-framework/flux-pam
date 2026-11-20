@@ -58,7 +58,9 @@ PREREQUISITES
 =============
 
 ``pam.manage-user-slice`` requires systemd ≥ 239 and the cgroup v2 unified
-hierarchy. Resource constraints (``AllowedCPUs``, ``AllowedMemoryNodes``,
+hierarchy. Resource constraints (``exec.sdexec-constrain-resources``) require
+systemd ≥ 244, which added ``AllowedCPUs`` and ``AllowedMemoryNodes``.
+Resource properties (``AllowedCPUs``, ``AllowedMemoryNodes``,
 ``DevicePolicy``, ``DeviceAllow``) are applied to user slice units via
 ``systemctl set-property --runtime``, which is only enforced by systemd on
 the unified hierarchy. cgroup v1 systems are not supported.
@@ -68,8 +70,9 @@ enabled for job users on compute nodes.** Linger (``loginctl enable-linger``)
 keeps ``user@UID.service`` running independently of jobs, bypassing Flux
 control. The prolog fails immediately if linger is detected.
 
-The prolog applies resource constraints to the user slice, creates an
-active marker file, and best-effort starts ``user@$UID.service`` (for
+The prolog applies resource constraints to the user slice (if
+``exec.sdexec-constrain-resources`` is enabled), creates an active marker
+file, and best-effort starts ``user@$UID.service`` (for
 background, see PROCFS WITH HIDEPID below). The PAM session module checks
 the marker under lock before admitting logins.
 
