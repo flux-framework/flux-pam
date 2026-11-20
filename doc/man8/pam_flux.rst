@@ -104,6 +104,10 @@ allow-guest-user
    - the job is an instance of Flux
    - ``access.allow-guest-user`` is set to ``true`` in the instance
      configuration
+   - the instance's ``local`` socket, named by the job's ``uri``
+     annotation, is a socket owned by the job owner
+
+  pam_flux connects to that socket with the job owner's credentials.
 
   Guests admitted this way are not placed in a slice by the session
   module. See Session Management.
@@ -327,6 +331,12 @@ Login denied with "no active jobs" while the user has a job
 "StartTransientUnit(...) failed"
   The session module could not create the scope through systemd. Check
   the systemd journal for the reason.
+
+"scope ... failed to start" or "timed out waiting for scope ... to start"
+  systemd accepted the scope but did not start it, or did not start it
+  within 10 seconds. The session module waits for the scope to start so
+  that the login process is in it before the session proceeds, and denies
+  the session otherwise. Check the systemd journal for the scope unit.
 
 Login admitted but not contained
   The user was admitted by another account module, or is a guest or the

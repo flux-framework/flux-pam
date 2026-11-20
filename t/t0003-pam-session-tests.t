@@ -169,10 +169,14 @@ test_expect_success 'scope-create: submit test job' '
 	jobid=$(submit_as_guest 5m sleep 300) &&
 	flux job wait-event $jobid start
 '
+#  The command is forked right after pam_open_session() returns, so its
+#  cgroup shows that pamtest was already moved into the scope.
 test_expect_success 'scope-create: session attach creates scope under user slice' '
 	pamtest_session -u ${TEST_USER} -- \
 		sh -c "systemctl show flux-pam-test-\$PPID.scope \
-		       -p Slice --value | grep user-${TEST_UID}.slice" \
+		       -p Slice --value | grep user-${TEST_UID}.slice &&
+		       grep user-${TEST_UID}.slice/flux-pam-test-\$PPID.scope \
+		       /proc/self/cgroup" \
 		>pamtest.out 2>&1 &&
 	test_debug "cat pamtest.out" &&
 	grep "attached user ${TEST_USER}.*scope=flux-pam-test" pamtest.out

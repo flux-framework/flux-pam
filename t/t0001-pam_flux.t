@@ -133,6 +133,13 @@ test_expect_success 'pam_flux: module rejects a local:// uri with whitespace' '
 	test_pam_flux_bad_uri "[uri=local:///run/.. ]" &&
 	test_pam_flux_bad_uri "[uri=local:///run/flux local]"
 '
+test_expect_success 'pam_flux: module denies silently with PAM_SILENT' '
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -q -u ${USER} >silent.out 2>&1) &&
+	test_debug "cat silent.out" &&
+	grep "access denied for user ${USER}" silent.out &&
+	test_must_fail grep "Access denied: user ${USER}" silent.out
+'
 test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	cat <<-EOF >config/epilog.toml &&
 	[job-manager.epilog]
@@ -225,6 +232,87 @@ test_expect_success 'pam_flux: access allowed if access.allow-guest-user=1' '
 	pamtest -u nobody &&
 	flux cancel $id &&
 	flux job wait-event -vt 15 $id clean
+'
+#  Rewrite the user.uri annotation of a guest-enabled instance to reach
+#  the same socket through "..", which valid_local_uri() rejects.
+test_expect_success 'pam_flux: access denied if instance uri contains ..' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	uri=$(flux jobs -no "{user.uri}" $id) &&
+	dir=$(dirname ${uri#ssh://*/}) &&
+	flux job memo $id \
+		uri=ssh://localhost/${dir}/../$(basename ${dir})/local-0 &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -u nobody >bad-guest-uri.out 2>&1) &&
+	test_debug "cat bad-guest-uri.out" &&
+	grep "invalid guest instance uri" bad-guest-uri.out &&
+	grep "Access denied: user nobody" bad-guest-uri.out &&
+	flux cancel $id &&
+	flux job wait-event -vt 15 $id clean
+'
+#  Rewrite the user.uri annotation of a guest-enabled instance to point at
+#  a path that is not the job owner's socket. pam_flux must not connect.
+test_expect_success 'pam_flux: access denied if instance uri is not a socket' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	touch $(pwd)/not-a-socket &&
+	flux job memo $id uri=ssh://localhost$(pwd)/not-a-socket &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -u nobody >guest-notsock.out 2>&1) &&
+	test_debug "cat guest-notsock.out" &&
+	grep "is not a socket owned by uid $(id -u)" guest-notsock.out &&
+	grep "Access denied: user nobody" guest-notsock.out
+'
+test_expect_success SUDO 'pam_flux: access denied if instance socket has another owner' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	sockdir=$(mktemp -d /tmp/pam-flux-t0001.XXXXXX) &&
+	test_when_finished "sudo rm -rf $sockdir" &&
+	sudo python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" \
+		$sockdir/sock &&
+	flux job memo $id uri=ssh://localhost$sockdir/sock &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -u nobody >guest-rootsock.out 2>&1) &&
+	test_debug "cat guest-rootsock.out" &&
+	grep "is not a socket owned by uid $(id -u)" guest-rootsock.out &&
+	grep "Access denied: user nobody" guest-rootsock.out
+'
+pamtest_root() {
+	sudo env \
+		LD_PRELOAD=libpam_wrapper.so \
+		PAM_WRAPPER=1 \
+		PAM_WRAPPER_DEBUGLEVEL=2 \
+		PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+		${PAMTEST} -v -s pam-test "$@"
+}
+test_expect_success SUDO 'pam_flux: guest allowed when run as root' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	pamtest_root -u nobody >guest-root.out 2>&1 &&
+	test_debug "cat guest-root.out"
+'
+#  A hard link to the instance socket in a directory only root can search
+#  passes the socket owner check as root, but pam_flux connects with the
+#  job owner's filesystem credentials, so the connect must fail.
+test_expect_success SUDO 'pam_flux: guest connect uses job owner credentials' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	uri=$(flux jobs -no "{user.uri}" $id) &&
+	sock=/${uri#ssh://*/} &&
+	rootdir=$(dirname $sock)/root-only &&
+	sudo mkdir -m 0700 $rootdir &&
+	test_when_finished "sudo rm -rf $rootdir" &&
+	sudo ln $sock $rootdir/sock &&
+	flux job memo $id uri=ssh://localhost$rootdir/sock &&
+	test_must_fail pamtest_root -u nobody >guest-rootdir.out 2>&1 &&
+	test_debug "cat guest-rootdir.out" &&
+	grep "Unable to connect to Flux at local://$rootdir/sock: Permission denied" \
+		guest-rootdir.out &&
+	grep "Access denied: user nobody" guest-rootdir.out
 '
 test_expect_success 'pam_flux: access denied if not rank 0 of job' '
 	id=$(flux alloc --conf=access.allow-guest-user=true --bg -N2) &&

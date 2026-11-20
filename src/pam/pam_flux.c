@@ -33,6 +33,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <jansson.h>
@@ -48,6 +49,7 @@
 #define PAM_SM_SESSION
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
+#include <security/pam_modutil.h>
 
 struct options {
     /*  If set, permit access to all users if the specified user has
@@ -244,6 +246,11 @@ static void pam_flux_close (pam_handle_t *pamh, struct pam_flux *pf)
     flux_env_restore (pamh, pf);
 }
 
+/*  Timeout in seconds for RPCs to Flux. A wedged broker module would
+ *  otherwise hang logins and user manager starts indefinitely.
+ */
+#define RPC_TIMEOUT 5.0
+
 static char *uri_to_local (const char *uri)
 {
     char *local_uri = NULL;
@@ -267,15 +274,51 @@ static char *uri_to_local (const char *uri)
     return local_uri;
 }
 
-/* Return 1 if local instance at uri has access.allow-guest-user=true.
- * Return 0 otherwise.
+/* Return 0 if the socket at local_uri is a socket owned by owner, so that
+ * a URI taken from a job annotation can only reach that job owner's own
+ * broker. lstat() so that a symlink is not followed. Return -1 otherwise.
  */
-static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
+static int check_socket_owner (pam_handle_t *pamh,
+                               const char *local_uri,
+                               uid_t owner)
+{
+    const char *path = local_uri + strlen ("local://");
+    struct stat st;
+
+    if (lstat (path, &st) < 0) {
+        pam_syslog (pamh, LOG_ERR, "guest instance socket %s: %m", path);
+        return -1;
+    }
+    if (!S_ISSOCK (st.st_mode) || st.st_uid != owner) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "guest instance socket %s is not a socket owned by"
+                    " uid %u",
+                    path,
+                    (unsigned int) owner);
+        return -1;
+    }
+    return 0;
+}
+
+/* Return 1 if local instance at uri, owned by owner, has
+ * access.allow-guest-user=true. Return 0 otherwise, or -1 if privileges
+ * could not be regained after the connect.
+ */
+static int check_guest_allowed (pam_handle_t *pamh,
+                                const char *uri,
+                                uid_t owner)
 {
     int allowed = 0;
     struct pam_flux pf = { 0 };
     flux_future_t *f = NULL;
     char *local_uri = NULL;
+    struct passwd pwd;
+    struct passwd *pw = NULL;
+    char pwbuf[4096];
+    PAM_MODUTIL_DEF_PRIVS (privs);
+    bool dropped = false;
+    bool regain_error = false;
 
     if (!uri)
         goto out;
@@ -287,9 +330,29 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
                     uri);
         goto out;
     }
+    if (!valid_local_uri (local_uri)) {
+        pam_syslog (pamh, LOG_ERR, "invalid guest instance uri %s", uri);
+        goto out;
+    }
+    if (check_socket_owner (pamh, local_uri, owner) < 0)
+        goto out;
+    /*  The socket path can be replaced between the check above and the
+     *  connect, e.g. with a symlink to a socket only root may connect to.
+     *  Talk to the instance with the job owner's filesystem credentials,
+     *  so that the connect succeeds only for a socket the job owner could
+     *  reach. Privileges are regained at out.
+     */
+    if (getpwuid_r (owner, &pwd, pwbuf, sizeof (pwbuf), &pw) != 0 || !pw) {
+        pam_syslog (pamh, LOG_ERR, "uid %u does not exist", owner);
+        goto out;
+    }
+    if (pam_modutil_drop_priv (pamh, &privs, pw) < 0)
+        goto out;
+    dropped = true;
     if (pam_flux_open (pamh, local_uri, LOG_ERR, &pf) < 0)
         goto out;
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
+        || flux_future_wait_for (f, RPC_TIMEOUT) < 0
         || flux_rpc_get_unpack (f,
                                 "{s?{s?b}}",
                                 "access",
@@ -304,8 +367,13 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
 out:
     flux_future_destroy (f);
     pam_flux_close (pamh, &pf);
+    /*  Fail closed if privileges cannot be regained: the caller may still
+     *  be running with the job owner's filesystem credentials.
+     */
+    if (dropped && pam_modutil_regain_priv (pamh, &privs) < 0)
+        regain_error = true;
     free (local_uri);
-    return allowed;
+    return regain_error ? -1 : allowed;
 }
 
 typedef enum {
@@ -357,8 +425,10 @@ static flux_auth_t check_jobs_array (pam_handle_t *pamh,
                  * access.allow-guest-user is enabled in the job instance:
                  */
                 if (rank == idset_first (ranks))
-                    allowed = check_guest_allowed (pamh, uri);
+                    allowed = check_guest_allowed (pamh, uri, job_uid);
                 idset_destroy (ranks);
+                if (allowed < 0)
+                    return FLUX_AUTH_ERROR;
                 if (allowed)
                     return FLUX_AUTH_GUEST;
             }
@@ -384,11 +454,6 @@ static uid_t attr_get_uid (flux_t *h, const char *name)
     return (uid_t) i;
 }
 
-
-/*  Timeout in seconds for the job-list query. A wedged job-list module
- *  would otherwise hang logins and user manager starts indefinitely.
- */
-#define JOB_LIST_TIMEOUT 5.0
 
 /*  get jobs in RUN state on this node for user(s) of interest:
  */
@@ -451,7 +516,7 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
                          "ranks", rankstr,
                          "states", FLUX_JOB_STATE_RUN);
     if (!f
-        || flux_future_wait_for (f, JOB_LIST_TIMEOUT) < 0
+        || flux_future_wait_for (f, RPC_TIMEOUT) < 0
         || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
         pam_syslog (pamh, LOG_ERR, "flux_job_list: %m");
         goto out;
@@ -726,6 +791,81 @@ static bool user_lock_is_held (pam_handle_t *pamh,
 
 #ifdef HAVE_LIBSYSTEMD
 
+/*  Timeout in seconds for systemd to run the scope start job.
+ */
+#define SCOPE_START_TIMEOUT 10
+
+/*  The start job of a scope, and its result once JobRemoved is received.
+ */
+struct start_job {
+    const char *path;
+    char result[32];
+};
+
+/*  JobRemoved signal handler. sd_bus_call() leaves signals queued until
+ *  sd_bus_process() dispatches them, so this runs only after the job path
+ *  has been read from the StartTransientUnit reply.
+ */
+static int job_removed_cb (sd_bus_message *m,
+                           void *arg,
+                           sd_bus_error *error)
+{
+    struct start_job *job = arg;
+    const char *path;
+    const char *result;
+
+    if (sd_bus_message_read (m, "uoss", NULL, &path, NULL, &result) >= 0
+        && strcmp (path, job->path) == 0)
+        snprintf (job->result, sizeof (job->result), "%s", result);
+    return 0;
+}
+
+/*  Process bus messages until the JobRemoved signal for job arrives.
+ *  Returns 0 if the job result is "done", -1 otherwise.
+ */
+static int wait_start_job (pam_handle_t *pamh,
+                           sd_bus *bus,
+                           const char *scope_name,
+                           struct start_job *job)
+{
+    struct timespec ts;
+    uint64_t now;
+    uint64_t deadline;
+    int r;
+
+    clock_gettime (CLOCK_MONOTONIC, &ts);
+    deadline = ts.tv_sec + SCOPE_START_TIMEOUT;
+    while (job->result[0] == '\0') {
+        if ((r = sd_bus_process (bus, NULL)) < 0) {
+            pam_syslog (pamh, LOG_ERR, "sd_bus_process: %s", strerror (-r));
+            return -1;
+        }
+        if (r > 0)
+            continue;
+        clock_gettime (CLOCK_MONOTONIC, &ts);
+        if ((now = ts.tv_sec) >= deadline) {
+            pam_syslog (pamh,
+                        LOG_ERR,
+                        "timed out waiting for scope %s to start",
+                        scope_name);
+            return -1;
+        }
+        if ((r = sd_bus_wait (bus, (deadline - now) * 1000000)) < 0) {
+            pam_syslog (pamh, LOG_ERR, "sd_bus_wait: %s", strerror (-r));
+            return -1;
+        }
+    }
+    if (strcmp (job->result, "done") != 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "scope %s failed to start: %s",
+                    scope_name,
+                    job->result);
+        return -1;
+    }
+    return 0;
+}
+
 /*  Create a transient scope under user-$UID.slice for the login session.
  *  Scope name: flux-pam-<pid>.scope
  *  PID alone is sufficient for uniqueness system-wide.
@@ -741,8 +881,11 @@ static int create_session_scope (pam_handle_t *pamh,
     sd_bus_error error = SD_BUS_ERROR_NULL;
     sd_bus_message *m = NULL;
     sd_bus_message *reply = NULL;
+    sd_bus_slot *slot = NULL;
+    struct start_job job = { 0 };
     char slice_name[64];
     int rc = -1;
+    int r;
 
     if (snprintf (slice_name,
                   sizeof (slice_name),
@@ -825,6 +968,26 @@ static int create_session_scope (pam_handle_t *pamh,
         goto out;
     }
 
+    /*  The reply means only that the start job is queued. systemd moves
+     *  pid into the scope when the job runs, and sends JobRemoved with the
+     *  job result to the caller that queued it. Add the match before the
+     *  call so the signal cannot be missed.
+     */
+    if ((r = sd_bus_match_signal (bus,
+                                  &slot,
+                                  "org.freedesktop.systemd1",
+                                  "/org/freedesktop/systemd1",
+                                  "org.freedesktop.systemd1.Manager",
+                                  "JobRemoved",
+                                  job_removed_cb,
+                                  &job)) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to add JobRemoved match: %s",
+                    strerror (-r));
+        goto out;
+    }
+
     /*  Call the method.
      */
     if (sd_bus_call (bus, m, 0, &error, &reply) < 0) {
@@ -835,6 +998,12 @@ static int create_session_scope (pam_handle_t *pamh,
                     error.message ? error.message : "unknown error");
         goto out;
     }
+    if (sd_bus_message_read (reply, "o", &job.path) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to read StartTransientUnit reply");
+        goto out;
+    }
+    if (wait_start_job (pamh, bus, scope_name, &job) < 0)
+        goto out;
 
     if (debug)
         pam_syslog (pamh,
@@ -845,6 +1014,7 @@ static int create_session_scope (pam_handle_t *pamh,
     rc = 0;
 
 out:
+    sd_bus_slot_unref (slot);
     sd_bus_message_unref (reply);
     sd_bus_message_unref (m);
     sd_bus_error_free (&error);
@@ -918,6 +1088,7 @@ static int check_pam_manage_user_slice (pam_handle_t *pamh,
     /*  Fetch broker config via RPC (not cached handle config).
      */
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
+        || flux_future_wait_for (f, RPC_TIMEOUT) < 0
         || flux_rpc_get_unpack (f,
                                 "{s?:{s?:b}}",
                                 "pam",
@@ -1083,7 +1254,7 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
         }
     }
 
-    if (auth != PAM_SUCCESS)
+    if (auth != PAM_SUCCESS && !(flags & PAM_SILENT))
         send_denial_msg (pamh, user, uid);
 
     /*
@@ -1235,7 +1406,8 @@ pam_sm_open_session (pam_handle_t *pamh,
         pam_syslog (pamh, LOG_ERR,
                     "failed session setup for %s: no active job found",
                     user);
-        send_denial_msg (pamh, user, uid);
+        if (!(flags & PAM_SILENT))
+            send_denial_msg (pamh, user, uid);
         user_lock_release (lock_fd);
         return PAM_SESSION_ERR;
     }
@@ -1315,7 +1487,8 @@ pam_sm_open_session (pam_handle_t *pamh,
                 "without libsystemd: denying session for user %s (uid=%u)",
                 user,
                 uid);
-    send_denial_msg (pamh, user, uid);
+    if (!(flags & PAM_SILENT))
+        send_denial_msg (pamh, user, uid);
     return PAM_SESSION_ERR;
 #endif
 
