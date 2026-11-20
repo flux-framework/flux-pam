@@ -15,8 +15,9 @@ Package: flux-pam
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, flux-core
 Description: PAM module for Flux
- flux-pam provides a PAM module for integrating systemd user services
- with Flux jobs, including prolog/housekeeping scripts for managing
- user slice resource constraints.
+ flux-pam provides a PAM module that restricts node access to users
+ with active Flux jobs and places their login sessions in the user's
+ systemd slice, with prolog/housekeeping scripts that manage the slice
+ and its resource constraints.
  Note: This package is meant for testing and may not meet Debian packaging
  standards.
