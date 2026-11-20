@@ -273,10 +273,39 @@ static char *uri_to_local (const char *uri)
     return local_uri;
 }
 
-/* Return 1 if local instance at uri has access.allow-guest-user=true.
- * Return 0 otherwise.
+/* Return 0 if the socket at local_uri is a socket owned by owner, so that
+ * a URI taken from a job annotation can only reach that job owner's own
+ * broker. lstat() so that a symlink is not followed. Return -1 otherwise.
  */
-static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
+static int check_socket_owner (pam_handle_t *pamh,
+                               const char *local_uri,
+                               uid_t owner)
+{
+    const char *path = local_uri + strlen ("local://");
+    struct stat st;
+
+    if (lstat (path, &st) < 0) {
+        pam_syslog (pamh, LOG_ERR, "guest instance socket %s: %m", path);
+        return -1;
+    }
+    if (!S_ISSOCK (st.st_mode) || st.st_uid != owner) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "guest instance socket %s is not a socket owned by"
+                    " uid %u",
+                    path,
+                    (unsigned int) owner);
+        return -1;
+    }
+    return 0;
+}
+
+/* Return 1 if local instance at uri, owned by owner, has
+ * access.allow-guest-user=true. Return 0 otherwise.
+ */
+static int check_guest_allowed (pam_handle_t *pamh,
+                                const char *uri,
+                                uid_t owner)
 {
     int allowed = 0;
     struct pam_flux pf = { 0 };
@@ -297,6 +326,8 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
         pam_syslog (pamh, LOG_ERR, "invalid guest instance uri %s", uri);
         goto out;
     }
+    if (check_socket_owner (pamh, local_uri, owner) < 0)
+        goto out;
     if (pam_flux_open (pamh, local_uri, LOG_ERR, &pf) < 0)
         goto out;
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
@@ -368,7 +399,7 @@ static flux_auth_t check_jobs_array (pam_handle_t *pamh,
                  * access.allow-guest-user is enabled in the job instance:
                  */
                 if (rank == idset_first (ranks))
-                    allowed = check_guest_allowed (pamh, uri);
+                    allowed = check_guest_allowed (pamh, uri, job_uid);
                 idset_destroy (ranks);
                 if (allowed)
                     return FLUX_AUTH_GUEST;
