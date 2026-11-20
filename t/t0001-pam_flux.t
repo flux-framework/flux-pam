@@ -279,6 +279,41 @@ test_expect_success SUDO 'pam_flux: access denied if instance socket has another
 	grep "is not a socket owned by uid $(id -u)" guest-rootsock.out &&
 	grep "Access denied: user nobody" guest-rootsock.out
 '
+pamtest_root() {
+	sudo env \
+		LD_PRELOAD=libpam_wrapper.so \
+		PAM_WRAPPER=1 \
+		PAM_WRAPPER_DEBUGLEVEL=2 \
+		PAM_WRAPPER_SERVICE_DIR=$(pwd) \
+		${PAMTEST} -v -s pam-test "$@"
+}
+test_expect_success SUDO 'pam_flux: guest allowed when run as root' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	pamtest_root -u nobody >guest-root.out 2>&1 &&
+	test_debug "cat guest-root.out"
+'
+#  A hard link to the instance socket in a directory only root can search
+#  passes the socket owner check as root, but pam_flux connects with the
+#  job owner's filesystem credentials, so the connect must fail.
+test_expect_success SUDO 'pam_flux: guest connect uses job owner credentials' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	uri=$(flux jobs -no "{user.uri}" $id) &&
+	sock=/${uri#ssh://*/} &&
+	rootdir=$(dirname $sock)/root-only &&
+	sudo mkdir -m 0700 $rootdir &&
+	test_when_finished "sudo rm -rf $rootdir" &&
+	sudo ln $sock $rootdir/sock &&
+	flux job memo $id uri=ssh://localhost$rootdir/sock &&
+	test_must_fail pamtest_root -u nobody >guest-rootdir.out 2>&1 &&
+	test_debug "cat guest-rootdir.out" &&
+	grep "Unable to connect to Flux at local://$rootdir/sock: Permission denied" \
+		guest-rootdir.out &&
+	grep "Access denied: user nobody" guest-rootdir.out
+'
 test_expect_success 'pam_flux: access denied if not rank 0 of job' '
 	id=$(flux alloc --conf=access.allow-guest-user=true --bg -N2) &&
 	test_must_fail pamtest_on_rank 1 -u nobody 2>allow-guest3.err &&
