@@ -49,6 +49,7 @@
 #define PAM_SM_SESSION
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
+#include <security/pam_modutil.h>
 
 struct options {
     /*  If set, permit access to all users if the specified user has
@@ -275,7 +276,12 @@ static char *uri_to_local (const char *uri)
 
 /* Return 0 if the socket at local_uri is a socket owned by owner, so that
  * a URI taken from a job annotation can only reach that job owner's own
- * broker. lstat() so that a symlink is not followed. Return -1 otherwise.
+ * broker. Return -1 otherwise.
+ * This is an early rejection with a clear error, not the protection
+ * itself: lstat() does not follow a symlink in the last path component,
+ * but does follow one in a parent directory, and the path can change
+ * before the connect. check_guest_allowed() connects with the job owner's
+ * credentials, so the connect reaches only what the job owner could.
  */
 static int check_socket_owner (pam_handle_t *pamh,
                                const char *local_uri,
@@ -301,7 +307,9 @@ static int check_socket_owner (pam_handle_t *pamh,
 }
 
 /* Return 1 if local instance at uri, owned by owner, has
- * access.allow-guest-user=true. Return 0 otherwise.
+ * access.allow-guest-user=true. Return 0 if it does not, or -1 if the
+ * check could not be made: the owner could not be looked up, or
+ * privileges could not be dropped or regained.
  */
 static int check_guest_allowed (pam_handle_t *pamh,
                                 const char *uri,
@@ -311,6 +319,12 @@ static int check_guest_allowed (pam_handle_t *pamh,
     struct pam_flux pf = { 0 };
     flux_future_t *f = NULL;
     char *local_uri = NULL;
+    struct passwd pwd;
+    struct passwd *pw = NULL;
+    char pwbuf[4096];
+    PAM_MODUTIL_DEF_PRIVS (privs);
+    bool dropped = false;
+    bool check_error = false;
 
     if (!uri)
         goto out;
@@ -328,6 +342,25 @@ static int check_guest_allowed (pam_handle_t *pamh,
     }
     if (check_socket_owner (pamh, local_uri, owner) < 0)
         goto out;
+    /*  The socket path can be replaced between the check above and the
+     *  connect, e.g. with a symlink to a socket only root may connect to.
+     *  Talk to the instance with the job owner's filesystem credentials,
+     *  so that the connect succeeds only for a socket the job owner could
+     *  reach. Privileges are regained at out.
+     */
+    if (getpwuid_r (owner, &pwd, pwbuf, sizeof (pwbuf), &pw) != 0 || !pw) {
+        pam_syslog (pamh, LOG_ERR, "failed to look up uid %u", owner);
+        check_error = true;
+        goto out;
+    }
+    /*  On failure, pam_modutil_drop_priv() restores any credentials it
+     *  changed, so there is nothing to regain.
+     */
+    if (pam_modutil_drop_priv (pamh, &privs, pw) < 0) {
+        check_error = true;
+        goto out;
+    }
+    dropped = true;
     if (pam_flux_open (pamh, local_uri, LOG_ERR, &pf) < 0)
         goto out;
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
@@ -346,8 +379,13 @@ static int check_guest_allowed (pam_handle_t *pamh,
 out:
     flux_future_destroy (f);
     pam_flux_close (pamh, &pf);
+    /*  Fail closed if privileges cannot be regained: the caller may still
+     *  be running with the job owner's filesystem credentials.
+     */
+    if (dropped && pam_modutil_regain_priv (pamh, &privs) < 0)
+        check_error = true;
     free (local_uri);
-    return allowed;
+    return check_error ? -1 : allowed;
 }
 
 typedef enum {
@@ -401,6 +439,8 @@ static flux_auth_t check_jobs_array (pam_handle_t *pamh,
                 if (rank == idset_first (ranks))
                     allowed = check_guest_allowed (pamh, uri, job_uid);
                 idset_destroy (ranks);
+                if (allowed < 0)
+                    return FLUX_AUTH_ERROR;
                 if (allowed)
                     return FLUX_AUTH_GUEST;
             }
