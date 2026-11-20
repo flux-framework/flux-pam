@@ -1556,6 +1556,25 @@ class TestSliceTeardown(unittest.TestCase):
                     self.helper.user_slice_teardown()
             self.assertIn("revert", mock_run.call_args[0][0])
 
+    def test_orphans_include_user_manager(self):
+        """Processes under user@UID.service are counted as orphans"""
+        root = os.path.join(self.lock_dir, "cgroup")
+        tree = os.path.join(root, "user.slice", "user-12345.slice")
+        for cgroup, pids in (
+            ("session-1.scope", "100\n"),
+            ("user@12345.service/app.slice/run-1.service", "200\n"),
+            ("user@12345.service/init.scope", ""),
+        ):
+            os.makedirs(os.path.join(tree, cgroup))
+            with open(os.path.join(tree, cgroup, "cgroup.procs"), "w") as f:
+                f.write(pids)
+
+        self.helper.cgroup_root = root
+        orphans = self.helper.check_orphan_processes()
+
+        self.assertEqual(len(orphans), 2)
+        self.assertTrue(any("run-1.service" in o for o in orphans))
+
 
 if __name__ == "__main__":
     if rerun_under_flux(__flux_size()):
