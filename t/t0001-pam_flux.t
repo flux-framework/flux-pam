@@ -250,6 +250,35 @@ test_expect_success 'pam_flux: access denied if instance uri contains ..' '
 	flux cancel $id &&
 	flux job wait-event -vt 15 $id clean
 '
+#  Rewrite the user.uri annotation of a guest-enabled instance to point at
+#  a path that is not the job owner's socket. pam_flux must not connect.
+test_expect_success 'pam_flux: access denied if instance uri is not a socket' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	touch $(pwd)/not-a-socket &&
+	flux job memo $id uri=ssh://localhost$(pwd)/not-a-socket &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -u nobody >guest-notsock.out 2>&1) &&
+	test_debug "cat guest-notsock.out" &&
+	grep "is not a socket owned by uid $(id -u)" guest-notsock.out &&
+	grep "Access denied: user nobody" guest-notsock.out
+'
+test_expect_success SUDO 'pam_flux: access denied if instance socket has another owner' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	test_when_finished "flux cancel $id; flux job wait-event -t 15 $id clean" &&
+	sockdir=$(mktemp -d /tmp/pam-flux-t0001.XXXXXX) &&
+	test_when_finished "sudo rm -rf $sockdir" &&
+	sudo python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" \
+		$sockdir/sock &&
+	flux job memo $id uri=ssh://localhost$sockdir/sock &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -u nobody >guest-rootsock.out 2>&1) &&
+	test_debug "cat guest-rootsock.out" &&
+	grep "is not a socket owned by uid $(id -u)" guest-rootsock.out &&
+	grep "Access denied: user nobody" guest-rootsock.out
+'
 test_expect_success 'pam_flux: access denied if not rank 0 of job' '
 	id=$(flux alloc --conf=access.allow-guest-user=true --bg -N2) &&
 	test_must_fail pamtest_on_rank 1 -u nobody 2>allow-guest3.err &&
