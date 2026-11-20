@@ -147,9 +147,9 @@ kill-user-slice
 
    When set to ``true``, housekeeping implements aggressive cleanup:
 
-   - Checks for orphan processes (processes in ``user-UID.slice`` but not
-     under ``user@UID.service``, such as leftover SSH sessions or other
-     systemd scopes)
+   - Checks for orphan processes (any process left in ``user-UID.slice``
+     after ``user@UID.service`` is stopped, such as leftover SSH sessions,
+     other systemd scopes, or user units if the stop failed)
    - If orphans exist, sends ``SIGTERM`` to all processes in the slice
    - Waits for ``kill-slice-grace-time`` for processes to exit
    - If processes remain, sends ``SIGKILL`` to all processes in the slice
@@ -167,12 +167,14 @@ kill-user-slice
 kill-slice-grace-time
    Duration in Flux Standard Duration (FSD) format specifying how long to
    wait for processes to exit after each kill signal. Only applies when
-   ``kill-user-slice = true``. (Default: ``"30s"``).
+   ``kill-user-slice = true``. Must be finite. (Default: ``"30s"``).
 
    The grace time is applied twice: once after ``SIGTERM``, once after
-   ``SIGKILL``. Maximum total cleanup time is therefore
-   ``2 * kill-slice-grace-time``. If processes remain after both waits,
-   housekeeping drains the node.
+   ``SIGKILL``. Cleanup therefore waits at most ``2 *
+   kill-slice-grace-time``, plus up to 30 seconds for each ``systemctl``
+   command. If processes remain after both waits, housekeeping drains the
+   node. Prolog and housekeeping wait for the user lock for ``150s + 2 *
+   kill-slice-grace-time``, enough to outlast the longest teardown.
 
    See :doc:`rfc:spec_23` for the FSD format specification.
 
