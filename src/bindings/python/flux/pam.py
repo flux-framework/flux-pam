@@ -149,6 +149,9 @@ class PAMHelper:
     acquires/releases locks and maintains flux connection state.
     """
 
+    # Mount point of the cgroup v2 unified hierarchy
+    cgroup_root = "/sys/fs/cgroup"
+
     def __init__(
         self,
         userid,
@@ -587,7 +590,7 @@ class PAMHelper:
         Returns:
             List of orphan process descriptions, or empty list if none
         """
-        slice_path = f"/sys/fs/cgroup/user.slice/user-{self.userid}.slice"
+        slice_path = f"{self.cgroup_root}/user.slice/user-{self.userid}.slice"
 
         # Check if slice exists
         if not os.path.exists(slice_path):
