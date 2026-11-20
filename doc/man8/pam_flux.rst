@@ -328,6 +328,12 @@ Login denied with "no active jobs" while the user has a job
   The session module could not create the scope through systemd. Check
   the systemd journal for the reason.
 
+"scope ... failed to start" or "timed out waiting for scope ... to start"
+  systemd accepted the scope but did not start it, or did not start it
+  within 10 seconds. The session module waits for the scope to start so
+  that the login process is in it before the session proceeds, and denies
+  the session otherwise. Check the systemd journal for the scope unit.
+
 Login admitted but not contained
   The user was admitted by another account module, or is a guest or the
   instance owner (see Session Management). Also check that
