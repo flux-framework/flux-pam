@@ -1083,7 +1083,7 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
         }
     }
 
-    if (auth != PAM_SUCCESS)
+    if (auth != PAM_SUCCESS && !(flags & PAM_SILENT))
         send_denial_msg (pamh, user, uid);
 
     /*
@@ -1235,7 +1235,8 @@ pam_sm_open_session (pam_handle_t *pamh,
         pam_syslog (pamh, LOG_ERR,
                     "failed session setup for %s: no active job found",
                     user);
-        send_denial_msg (pamh, user, uid);
+        if (!(flags & PAM_SILENT))
+            send_denial_msg (pamh, user, uid);
         user_lock_release (lock_fd);
         return PAM_SESSION_ERR;
     }
@@ -1315,7 +1316,8 @@ pam_sm_open_session (pam_handle_t *pamh,
                 "without libsystemd: denying session for user %s (uid=%u)",
                 user,
                 uid);
-    send_denial_msg (pamh, user, uid);
+    if (!(flags & PAM_SILENT))
+        send_denial_msg (pamh, user, uid);
     return PAM_SESSION_ERR;
 #endif
 
