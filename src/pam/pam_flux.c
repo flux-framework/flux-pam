@@ -1200,6 +1200,11 @@ static int systemd_user_acct_mgmt (pam_handle_t *pamh,
     return PAM_IGNORE;
 }
 
+static void free_data (pam_handle_t *pamh, void *data, int error_status)
+{
+    free (data);
+}
+
 PAM_EXTERN int
 pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
@@ -1226,9 +1231,9 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
          *  return PAM_SUCCESS:
          */
         auth = PAM_SUCCESS;
-        /*  If user is job owner, set pam_flux_authorized sentinel to allow
-         *  other PAM callbacks to determine that pam_flux authorized
-         *  access for this login attempt.
+        /*  If user is job owner, set pam_flux_authorized sentinel to the
+         *  admitted uid to allow other PAM callbacks to determine that
+         *  pam_flux authorized access for this user.
          *
          *  Deny if it cannot be stored. Without the sentinel this job
          *  owner is indistinguishable in the session stack from a user
@@ -1236,10 +1241,17 @@ pam_sm_acct_mgmt (pam_handle_t *pamh, int flags, int argc, const char **argv)
          *  uncontained, so the session would skip the slice.
          */
         if (result == FLUX_AUTH_JOB_OWNER) {
-            int rc = pam_set_data (pamh,
+            uid_t *data = malloc (sizeof (*data));
+            int rc = PAM_BUF_ERR;
+            if (data) {
+                *data = uid;
+                rc = pam_set_data (pamh,
                                    "pam_flux_authorized",
-                                   (void *) 0x1,
-                                   NULL);
+                                   data,
+                                   free_data);
+                if (rc != PAM_SUCCESS)
+                    free (data);
+            }
             if (rc != PAM_SUCCESS) {
                 pam_syslog (pamh,
                             LOG_ERR,
@@ -1307,9 +1319,10 @@ pam_sm_open_session (pam_handle_t *pamh,
 
     /*  Session management decision table:
      *
-     *  pam_flux_authorized is a sentinel set by pam_sm_acct_mgmt when it
-     *  grants access to a direct job owner. Its presence means "this user was
-     *  authorized by pam_flux and has an active job."
+     *  pam_flux_authorized is a sentinel set by pam_sm_acct_mgmt to the uid
+     *  of a direct job owner it grants access. Its presence with a uid
+     *  matching PAM_USER means "this user was authorized by pam_flux and
+     *  has an active job."
      *
      *  This implementation assumes pam_systemd.so is absent. Such that
      *  fall-through in the session PAM stack via PAM_IGNORE will not
@@ -1323,7 +1336,7 @@ pam_sm_open_session (pam_handle_t *pamh,
      *    User authorized by pam_flux but feature disabled. Return success
      *    without creating scope.
      *
-     *  Scenario 3: No sentinel
+     *  Scenario 3: No sentinel, or sentinel for a different uid
      *    User authorized by another module (e.g. pam_access.so for admins).
      *    Return PAM_IGNORE - session runs in sshd's cgroup.
      */
@@ -1336,12 +1349,26 @@ pam_sm_open_session (pam_handle_t *pamh,
         return PAM_IGNORE;
     }
 
-    /*  Sentinel present: user authorized by pam_flux.
-     *  Check if manage-user-slice feature is enabled.
-     */
     if (get_pam_user_uid (pamh, &user, &uid) < 0)
         return PAM_SESSION_ERR;
 
+    /*  PAM_USER may change after account management (e.g. sudo sets it to
+     *  the target user). pam_flux did not authorize a different user.
+     */
+    if (uid != *(const uid_t *) pam_flux_authorized) {
+        if (opts.debug)
+            pam_syslog (pamh,
+                        LOG_INFO,
+                        "skipping session setup for uid=%u: pam_flux"
+                        " authorized uid=%u",
+                        uid,
+                        *(const uid_t *) pam_flux_authorized);
+        return PAM_IGNORE;
+    }
+
+    /*  Sentinel matches: user authorized by pam_flux.
+     *  Check if manage-user-slice feature is enabled.
+     */
     if (check_pam_manage_user_slice (pamh, opts.uri, &manage_slice, &owner) < 0)
         return PAM_SESSION_ERR;
 
