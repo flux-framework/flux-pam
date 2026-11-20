@@ -133,6 +133,13 @@ test_expect_success 'pam_flux: module rejects a local:// uri with whitespace' '
 	test_pam_flux_bad_uri "[uri=local:///run/.. ]" &&
 	test_pam_flux_bad_uri "[uri=local:///run/flux local]"
 '
+test_expect_success 'pam_flux: module denies silently with PAM_SILENT' '
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -q -u ${USER} >silent.out 2>&1) &&
+	test_debug "cat silent.out" &&
+	grep "access denied for user ${USER}" silent.out &&
+	test_must_fail grep "Access denied: user ${USER}" silent.out
+'
 test_expect_success 'pam_flux: module denies access during CLEANUP' '
 	cat <<-EOF >config/epilog.toml &&
 	[job-manager.epilog]
