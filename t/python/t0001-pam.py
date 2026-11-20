@@ -1478,6 +1478,31 @@ class TestKillUserSlice(unittest.TestCase):
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
 
+class TestGraceTime(unittest.TestCase):
+    """Test pam.kill-slice-grace-time handling"""
+
+    def make_helper(self, grace):
+        config = {"pam.kill-slice-grace-time": grace}
+        with patch("flux.Flux") as mock_flux:
+            mock_flux.return_value.conf_get.side_effect = (
+                lambda key, default: config.get(key, default)
+            )
+            with patch("flux.pam.acquire_lock") as mock_lock:
+                flux.pam.PAMHelper(12345, flux.job.JobID(1))
+                return mock_lock
+
+    def test_infinite_grace_time_rejected(self):
+        """An infinite grace time fails rather than hang cleanup"""
+        for grace in ("inf", "infinity"):
+            with self.assertRaisesRegex(ValueError, "must be finite"):
+                self.make_helper(grace)
+
+    def test_negative_grace_time_rejected(self):
+        """A negative grace time fails"""
+        with self.assertRaises(ValueError):
+            self.make_helper("-1s")
+
+
 class TestSliceTeardown(unittest.TestCase):
     """Test last-job slice teardown"""
 
