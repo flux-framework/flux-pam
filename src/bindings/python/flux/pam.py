@@ -12,6 +12,7 @@
 
 import errno
 import fcntl
+import math
 import os
 import stat
 import subprocess
@@ -163,6 +164,7 @@ class PAMHelper:
 
         Raises:
             OSError: If lock cannot be acquired
+            ValueError: If pam.kill-slice-grace-time is invalid or infinite
         """
         self.userid = userid
         self.jobid = jobid
@@ -188,9 +190,12 @@ class PAMHelper:
         self.kill_user_slice = self.handle.conf_get(
             "pam.kill-user-slice", False
         )
-        self.kill_grace_time = parse_fsd(
-            self.handle.conf_get("pam.kill-slice-grace-time", "30s")
-        )
+        grace = self.handle.conf_get("pam.kill-slice-grace-time", "30s")
+        self.kill_grace_time = parse_fsd(grace)
+        if not math.isfinite(self.kill_grace_time):
+            raise ValueError(
+                f"pam.kill-slice-grace-time must be finite: {grace!r}"
+            )
 
         # Set up lock directory and paths
         self._lock_dir = os.environ.get("FLUX_PAM_LOCK_DIR", "/run/flux-pam")
