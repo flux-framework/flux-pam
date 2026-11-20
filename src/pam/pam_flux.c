@@ -292,6 +292,10 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
                     uri);
         goto out;
     }
+    if (!valid_local_uri (local_uri)) {
+        pam_syslog (pamh, LOG_ERR, "invalid guest instance uri %s", uri);
+        goto out;
+    }
     if (pam_flux_open (pamh, local_uri, LOG_ERR, &pf) < 0)
         goto out;
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
