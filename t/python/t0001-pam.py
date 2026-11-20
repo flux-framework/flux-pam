@@ -1262,13 +1262,10 @@ class TestKillUserSlice(unittest.TestCase):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         helper.user_slice_teardown()
 
-                        # Should call stop and revert
-                        # (no kill since no orphans)
-                        self.assertEqual(mock_run.call_count, 2)
+                        # Should call only stop (no kill since no orphans)
+                        self.assertEqual(mock_run.call_count, 1)
                         call_str = str(mock_run.call_args_list[0])
                         self.assertIn("stop", call_str)
-                        call_str = str(mock_run.call_args_list[1])
-                        self.assertIn("revert", call_str)
         finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
@@ -1301,8 +1298,8 @@ class TestKillUserSlice(unittest.TestCase):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         helper.user_slice_teardown()
 
-                        # Should call stop, kill (SIGTERM), revert
-                        self.assertEqual(mock_run.call_count, 3)
+                        # Should call stop and kill (SIGTERM)
+                        self.assertEqual(mock_run.call_count, 2)
                         calls = [str(call) for call in mock_run.call_args_list]
                         self.assertTrue(
                             any("SIGTERM" in c for c in calls),
@@ -1311,10 +1308,6 @@ class TestKillUserSlice(unittest.TestCase):
                         self.assertTrue(
                             any("stop" in c for c in calls),
                             "Should stop service",
-                        )
-                        self.assertTrue(
-                            any("revert" in c for c in calls),
-                            "Should revert slice",
                         )
         finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
@@ -1349,12 +1342,10 @@ class TestKillUserSlice(unittest.TestCase):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         helper.user_slice_teardown()
 
-                        # Should call stop and revert (no kill)
-                        self.assertEqual(mock_run.call_count, 2)
+                        # Should call only stop (no kill)
+                        self.assertEqual(mock_run.call_count, 1)
                         call_str = str(mock_run.call_args_list[0])
                         self.assertIn("stop", call_str)
-                        call_str = str(mock_run.call_args_list[1])
-                        self.assertIn("revert", call_str)
 
                         # Should NOT check for orphans
                         mock_orphans.assert_not_called()
@@ -1533,28 +1524,25 @@ class TestSliceTeardown(unittest.TestCase):
         del os.environ["FLUX_PAM_LOCK_DIR"]
 
     def test_teardown_tolerates_stop_timeout(self):
-        """A user manager stop timeout does not skip cleanup or revert"""
+        """A user manager stop timeout does not skip cleanup"""
 
         def run(args):
             if "stop" in args:
                 raise subprocess.TimeoutExpired(args, 30)
 
-        with patch("flux.pam.run_subprocess", side_effect=run) as mock_run:
+        with patch("flux.pam.run_subprocess", side_effect=run):
             with patch.object(self.helper, "_cleanup_user_slice") as cleanup:
                 self.helper.user_slice_teardown()
                 cleanup.assert_called_once()
-            self.assertIn("revert", mock_run.call_args[0][0])
 
-    def test_teardown_reverts_when_cleanup_raises(self):
-        """The slice is reverted even if cleanup raises, then error raised"""
-        error = subprocess.CalledProcessError(1, ["systemctl", "kill"])
+    def test_teardown_leaves_slice_constraints(self):
+        """Teardown does not revert or reset the slice constraints"""
         with patch("flux.pam.run_subprocess") as mock_run:
-            with patch.object(
-                self.helper, "_cleanup_user_slice", side_effect=error
-            ):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    self.helper.user_slice_teardown()
-            self.assertIn("revert", mock_run.call_args[0][0])
+            with patch.object(self.helper, "_cleanup_user_slice"):
+                self.helper.user_slice_teardown()
+        for call in mock_run.call_args_list:
+            self.assertNotIn("revert", call[0][0])
+            self.assertNotIn("set-property", call[0][0])
 
     def test_orphans_include_user_manager(self):
         """Processes under user@UID.service are counted as orphans"""
