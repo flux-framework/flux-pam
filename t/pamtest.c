@@ -29,9 +29,9 @@
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
 
-#define GETOPT_ARGS "hvu:s:SeE:D:"
+#define GETOPT_ARGS "hvu:s:SqeE:D:"
 #define USAGE "\
-Usage %s [-v] -u user -s service [-S] [-e] [-E name]\n\
+Usage %s [-v] -u user -s service [-S] [-q] [-e] [-E name]\n\
           [-D name=value]\n\
           [cmd [args...]]\n\
   -h          This help message.\n\
@@ -39,6 +39,7 @@ Usage %s [-v] -u user -s service [-S] [-e] [-E name]\n\
   -s service  Use service name \"service\"\n\
   -u user     Use user name \"user\"\n\
   -S          Call session functions (open/close)\n\
+  -q          Pass PAM_SILENT to account and session functions\n\
   -e          Print PAM environment after session open\n\
   -E name     Print process environment variable \"name\" after PAM calls\n\
               (may be repeated)\n\
@@ -55,6 +56,7 @@ struct program_opts {
     char *service;
     char host[1024];
     int test_session;
+    int flags;
     int print_env;
     char *print_vars[16];
     int print_var_count;
@@ -140,6 +142,8 @@ void handle_args (struct program_opts *opt, int ac, char *av[])
                    break;
         case 'S' : opt->test_session = 1;
                    break;
+        case 'q' : opt->flags = PAM_SILENT;
+                   break;
         case 'e' : opt->print_env = 1;
                    break;
         case 'E' : if (opt->print_var_count == 16)
@@ -224,8 +228,8 @@ int do_pam_setup (pam_handle_t **ppamh, struct program_opts *opt)
      *  Call PAM account mgmt stack
      *  (Is user permitted access?)
      */
-    log_verbose ("pam_acct_mgmt (pamh, 0)\n");
-    if ((rc = pam_acct_mgmt (pamh, 0)) != PAM_SUCCESS)
+    log_verbose ("pam_acct_mgmt (pamh, %d)\n", opt->flags);
+    if ((rc = pam_acct_mgmt (pamh, opt->flags)) != PAM_SUCCESS)
         log_fatal ("User %s not authorized. rc=%d\n", opt->user, rc);
     log_verbose ("pam_acct_mgmt rc=%d\n", rc);
 
@@ -233,8 +237,8 @@ int do_pam_setup (pam_handle_t **ppamh, struct program_opts *opt)
      *  Call PAM session functions if requested
      */
     if (opt->test_session) {
-        log_verbose ("pam_open_session (pamh, 0)\n");
-        if ((rc = pam_open_session (pamh, 0)) != PAM_SUCCESS)
+        log_verbose ("pam_open_session (pamh, %d)\n", opt->flags);
+        if ((rc = pam_open_session (pamh, opt->flags)) != PAM_SUCCESS)
             log_fatal ("pam_open_session failed. rc=%d\n", rc);
         log_verbose ("pam_open_session rc=%d\n", rc);
 
@@ -259,8 +263,8 @@ int do_pam_end (pam_handle_t *pamh, struct program_opts *opt)
 {
     int rc;
     if (opt->test_session) {
-        log_verbose ("pam_close_session (pamh, 0)\n");
-        if ((rc = pam_close_session (pamh, 0)) != PAM_SUCCESS)
+        log_verbose ("pam_close_session (pamh, %d)\n", opt->flags);
+        if ((rc = pam_close_session (pamh, opt->flags)) != PAM_SUCCESS)
             log_fatal ("pam_close_session failed. rc=%d\n", rc);
         log_verbose ("pam_close_session rc=%d\n", rc);
     }
