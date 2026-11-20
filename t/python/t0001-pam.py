@@ -1262,13 +1262,10 @@ class TestKillUserSlice(unittest.TestCase):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         helper.user_slice_teardown()
 
-                        # Should call stop and revert
-                        # (no kill since no orphans)
-                        self.assertEqual(mock_run.call_count, 2)
+                        # Should call only stop (no kill since no orphans)
+                        self.assertEqual(mock_run.call_count, 1)
                         call_str = str(mock_run.call_args_list[0])
                         self.assertIn("stop", call_str)
-                        call_str = str(mock_run.call_args_list[1])
-                        self.assertIn("revert", call_str)
         finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
@@ -1301,8 +1298,8 @@ class TestKillUserSlice(unittest.TestCase):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         helper.user_slice_teardown()
 
-                        # Should call stop, kill (SIGTERM), revert
-                        self.assertEqual(mock_run.call_count, 3)
+                        # Should call stop and kill (SIGTERM)
+                        self.assertEqual(mock_run.call_count, 2)
                         calls = [str(call) for call in mock_run.call_args_list]
                         self.assertTrue(
                             any("SIGTERM" in c for c in calls),
@@ -1311,10 +1308,6 @@ class TestKillUserSlice(unittest.TestCase):
                         self.assertTrue(
                             any("stop" in c for c in calls),
                             "Should stop service",
-                        )
-                        self.assertTrue(
-                            any("revert" in c for c in calls),
-                            "Should revert slice",
                         )
         finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
@@ -1349,12 +1342,10 @@ class TestKillUserSlice(unittest.TestCase):
                     with patch("flux.pam.run_subprocess") as mock_run:
                         helper.user_slice_teardown()
 
-                        # Should call stop and revert (no kill)
-                        self.assertEqual(mock_run.call_count, 2)
+                        # Should call only stop (no kill)
+                        self.assertEqual(mock_run.call_count, 1)
                         call_str = str(mock_run.call_args_list[0])
                         self.assertIn("stop", call_str)
-                        call_str = str(mock_run.call_args_list[1])
-                        self.assertIn("revert", call_str)
 
                         # Should NOT check for orphans
                         mock_orphans.assert_not_called()
@@ -1476,6 +1467,101 @@ class TestKillUserSlice(unittest.TestCase):
         finally:
             shutil.rmtree(os.environ["FLUX_PAM_LOCK_DIR"], ignore_errors=True)
             del os.environ["FLUX_PAM_LOCK_DIR"]
+
+
+class TestGraceTime(unittest.TestCase):
+    """Test pam.kill-slice-grace-time handling"""
+
+    def make_helper(self, grace):
+        config = {"pam.kill-slice-grace-time": grace}
+        with patch("flux.Flux") as mock_flux:
+            mock_flux.return_value.conf_get.side_effect = (
+                lambda key, default: config.get(key, default)
+            )
+            with patch("flux.pam.acquire_lock") as mock_lock:
+                flux.pam.PAMHelper(12345, flux.job.JobID(1))
+                return mock_lock
+
+    def test_infinite_grace_time_rejected(self):
+        """An infinite grace time fails rather than hang cleanup"""
+        for grace in ("inf", "infinity"):
+            with self.assertRaisesRegex(ValueError, "must be finite"):
+                self.make_helper(grace)
+
+    def test_negative_grace_time_rejected(self):
+        """A negative grace time fails"""
+        with self.assertRaises(ValueError):
+            self.make_helper("-1s")
+
+    def test_lock_timeout_covers_grace_time(self):
+        """The lock wait grows with the grace time"""
+        for grace, seconds in (("30s", 30), ("5m", 300)):
+            mock_lock = self.make_helper(grace)
+            timeout = mock_lock.call_args[1]["timeout"]
+            self.assertEqual(
+                timeout, 5 * flux.pam.SUBPROCESS_TIMEOUT + 2 * seconds
+            )
+
+
+class TestSliceTeardown(unittest.TestCase):
+    """Test last-job slice teardown"""
+
+    def setUp(self):
+        self.lock_dir = tempfile.mkdtemp()
+        os.environ["FLUX_PAM_LOCK_DIR"] = self.lock_dir
+        patcher = patch("flux.Flux")
+        mock_flux = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_flux.return_value.conf_get.side_effect = (
+            lambda key, default: default
+        )
+        self.helper = flux.pam.PAMHelper(12345, flux.job.JobID(1))
+        self.helper.kill_user_slice = True
+
+    def tearDown(self):
+        self.helper.__exit__(None, None, None)
+        shutil.rmtree(self.lock_dir, ignore_errors=True)
+        del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_teardown_tolerates_stop_timeout(self):
+        """A user manager stop timeout does not skip cleanup"""
+
+        def run(args):
+            if "stop" in args:
+                raise subprocess.TimeoutExpired(args, 30)
+
+        with patch("flux.pam.run_subprocess", side_effect=run):
+            with patch.object(self.helper, "_cleanup_user_slice") as cleanup:
+                self.helper.user_slice_teardown()
+                cleanup.assert_called_once()
+
+    def test_teardown_leaves_slice_constraints(self):
+        """Teardown does not revert or reset the slice constraints"""
+        with patch("flux.pam.run_subprocess") as mock_run:
+            with patch.object(self.helper, "_cleanup_user_slice"):
+                self.helper.user_slice_teardown()
+        for call in mock_run.call_args_list:
+            self.assertNotIn("revert", call[0][0])
+            self.assertNotIn("set-property", call[0][0])
+
+    def test_orphans_include_user_manager(self):
+        """Processes under user@UID.service are counted as orphans"""
+        root = os.path.join(self.lock_dir, "cgroup")
+        tree = os.path.join(root, "user.slice", "user-12345.slice")
+        for cgroup, pids in (
+            ("session-1.scope", "100\n"),
+            ("user@12345.service/app.slice/run-1.service", "200\n"),
+            ("user@12345.service/init.scope", ""),
+        ):
+            os.makedirs(os.path.join(tree, cgroup))
+            with open(os.path.join(tree, cgroup, "cgroup.procs"), "w") as f:
+                f.write(pids)
+
+        self.helper.cgroup_root = root
+        orphans = self.helper.check_orphan_processes()
+
+        self.assertEqual(len(orphans), 2)
+        self.assertTrue(any("run-1.service" in o for o in orphans))
 
 
 if __name__ == "__main__":

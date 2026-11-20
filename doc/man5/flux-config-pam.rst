@@ -129,7 +129,7 @@ manage-user-slice
    Boolean value that enables systemd user slice management via prolog and
    housekeeping scripts. When enabled, the prolog applies slice constraints,
    publishes the active marker, and best-effort starts ``user@$UID.service``;
-   housekeeping reverts and clears the marker when the last job completes.
+   housekeeping clears the marker when the last job completes.
    This is the master switch for all user slice management features,
    including session attachment in ``pam_flux.so`` (see :man8:`pam_flux`).
    (Default: ``false``).
@@ -147,9 +147,9 @@ kill-user-slice
 
    When set to ``true``, housekeeping implements aggressive cleanup:
 
-   - Checks for orphan processes (processes in ``user-UID.slice`` but not
-     under ``user@UID.service``, such as leftover SSH sessions or other
-     systemd scopes)
+   - Checks for orphan processes (any process left in ``user-UID.slice``
+     after ``user@UID.service`` is stopped, such as leftover SSH sessions,
+     other systemd scopes, or user units if the stop failed)
    - If orphans exist, sends ``SIGTERM`` to all processes in the slice
    - Waits for ``kill-slice-grace-time`` for processes to exit
    - If processes remain, sends ``SIGKILL`` to all processes in the slice
@@ -167,12 +167,14 @@ kill-user-slice
 kill-slice-grace-time
    Duration in Flux Standard Duration (FSD) format specifying how long to
    wait for processes to exit after each kill signal. Only applies when
-   ``kill-user-slice = true``. (Default: ``"30s"``).
+   ``kill-user-slice = true``. Must be finite. (Default: ``"30s"``).
 
    The grace time is applied twice: once after ``SIGTERM``, once after
-   ``SIGKILL``. Maximum total cleanup time is therefore
-   ``2 * kill-slice-grace-time``. If processes remain after both waits,
-   housekeeping drains the node.
+   ``SIGKILL``. Cleanup therefore waits at most ``2 *
+   kill-slice-grace-time``, plus up to 30 seconds for each ``systemctl``
+   command. If processes remain after both waits, housekeeping drains the
+   node. Prolog and housekeeping wait for the user lock for ``150s + 2 *
+   kill-slice-grace-time``, enough to outlast the longest teardown.
 
    See :doc:`rfc:spec_23` for the FSD format specification.
 
@@ -259,12 +261,13 @@ actions (when ``pam.manage-user-slice`` is enabled):
    - Best-effort stop ``user@UID.service`` (failure logged and ignored)
    - If ``pam.kill-user-slice`` is ``true``, perform cleanup sequence
      (see ``kill-user-slice`` above)
-   - Revert the slice constraint drop-ins (``systemctl revert user-UID.slice``)
 
 5. Release the lock
 
 The empty slice goes dead and is garbage-collected automatically; there is no
-need to explicitly stop the slice.
+need to explicitly stop the slice. Housekeeping leaves the slice constraints
+in place: they remain until the user's next job on the node replaces them, or
+until reboot (see User Slice Ownership).
 
 
 LOCKING AND SERIALIZATION
@@ -353,6 +356,27 @@ were allocated to previous jobs. Sites concerned about this should either:
 - Configure systemd's ``KillMode`` for user slices to handle cleanup
 - Deploy separate mechanisms to detect and terminate orphan processes
 - Use ``pam_flux.so`` account management to deny non-job logins entirely
+
+User Slice Ownership
+--------------------
+
+With ``pam.manage-user-slice`` enabled, flux-pam manages ``user-UID.slice``
+for job users. The prolog sets its constraints with ``systemctl set-property
+--runtime``, and they persist until the user's next job on the node replaces
+them, or until reboot. Housekeeping does not revert them after the user's
+last job, since that would reload the system manager each time. Units placed
+in the slice by other means, such as ``systemd-run --slice`` or a
+``pam_systemd.so`` session, may run with the constraints of the user's last
+job.
+
+flux-pam assumes the set of properties the ``sdexec`` mapper returns does
+not change between jobs. If a configuration change removes a property, for
+example a memory limit removed from ``exec.sdexec-properties``, existing
+user slices keep the old value. After such a change, reboot the nodes, or
+run ``systemctl revert user-UID.slice`` for each affected user on nodes
+where that user has no running jobs, such as a drained node. Reverting the
+slice of a user with a running job removes that job's constraints from the
+slice until the user's next job on the node, and reloads the system manager.
 
 EXAMPLES
 ========

@@ -12,6 +12,7 @@
 
 import errno
 import fcntl
+import math
 import os
 import stat
 import subprocess
@@ -22,6 +23,9 @@ import flux
 from flux.job import JobKVSLookup, JobList
 from flux.resource import ResourceSet
 from flux.util import parse_fsd
+
+# Maximum seconds run_subprocess() waits for a command
+SUBPROCESS_TIMEOUT = 30
 
 
 def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
@@ -104,13 +108,13 @@ def release_lock(fd):
             os.close(fd)
 
 
-def run_subprocess(args, timeout=30):
+def run_subprocess(args, timeout=SUBPROCESS_TIMEOUT):
     """
     Run a subprocess with timeout, requiring absolute paths.
 
     Args:
         args: List of command arguments (first must be absolute path)
-        timeout: Maximum seconds to wait (default: 30)
+        timeout: Maximum seconds to wait (default: SUBPROCESS_TIMEOUT)
 
     Returns:
         subprocess.CompletedProcess result
@@ -145,6 +149,9 @@ class PAMHelper:
     acquires/releases locks and maintains flux connection state.
     """
 
+    # Mount point of the cgroup v2 unified hierarchy
+    cgroup_root = "/sys/fs/cgroup"
+
     def __init__(
         self,
         userid,
@@ -163,6 +170,7 @@ class PAMHelper:
 
         Raises:
             OSError: If lock cannot be acquired
+            ValueError: If pam.kill-slice-grace-time is invalid or infinite
         """
         self.userid = userid
         self.jobid = jobid
@@ -188,16 +196,29 @@ class PAMHelper:
         self.kill_user_slice = self.handle.conf_get(
             "pam.kill-user-slice", False
         )
-        self.kill_grace_time = parse_fsd(
-            self.handle.conf_get("pam.kill-slice-grace-time", "30s")
-        )
+        grace = self.handle.conf_get("pam.kill-slice-grace-time", "30s")
+        self.kill_grace_time = parse_fsd(grace)
+        if not math.isfinite(self.kill_grace_time):
+            raise ValueError(
+                f"pam.kill-slice-grace-time must be finite: {grace!r}"
+            )
 
         # Set up lock directory and paths
         self._lock_dir = os.environ.get("FLUX_PAM_LOCK_DIR", "/run/flux-pam")
         self._marker_path = f"{self._lock_dir}/uid.{userid}.active"
 
-        # Acquire lock for this user
-        self._lock_fd = acquire_lock(userid, lock_dir=self._lock_dir)
+        # Acquire lock for this user. Wait long enough to outlast the
+        # longest hold by another script: last-job housekeeping runs up to
+        # three systemctl commands (stop, two kills) and waits out the
+        # grace time twice. Two more SUBPROCESS_TIMEOUTs cover its Flux
+        # RPCs and polling overhead. The prolog holds the lock for less:
+        # three systemctl commands (linger check, set-property, user
+        # manager start) and its Flux RPCs. Extra slack is cheap, since
+        # a wait that is too short fails the prolog and drains the node.
+        lock_timeout = 5 * SUBPROCESS_TIMEOUT + 2 * self.kill_grace_time
+        self._lock_fd = acquire_lock(
+            userid, timeout=lock_timeout, lock_dir=self._lock_dir
+        )
 
     def __enter__(self):
         """Context manager entry."""
@@ -509,6 +530,17 @@ class PAMHelper:
 
         # Apply properties to slice. An empty set is still applied, so that
         # devices left by an earlier update are cleared.
+        #
+        # Properties are applied with set-property --runtime and are not
+        # reverted after the user's last job. This relies on the set of
+        # properties the mapper returns being stable between jobs: other
+        # than DeviceAllow and DevicePolicy, which modify_slice() resets on
+        # every update, a property the mapper no longer returns is not
+        # cleared. After a configuration change that drops one, reboot, or
+        # run "systemctl revert user-UID.slice" where the user has no
+        # running jobs. Tracking applied properties to reset them
+        # automatically was considered and rejected as not worth the added
+        # state.
         self.debug_log(
             f"{script_type}: applying {len(properties)} properties to slice"
         )
@@ -538,19 +570,6 @@ class PAMHelper:
         except FileNotFoundError:
             pass
 
-    def revert_slice(self):
-        """Remove Flux-applied resource-control drop-ins from the user slice.
-
-        set-property --runtime stores a drop-in that persists until reboot or
-        revert. Revert on last-job teardown so this job's constraints do not
-        linger. Reverting a slice with no drop-ins is a no-op.
-        """
-        slice_name = f"user-{self.userid}.slice"
-        try:
-            run_subprocess([self.systemctl, "revert", slice_name])
-        except subprocess.CalledProcessError as e:
-            self.debug_log(f"slice revert non-fatal: {e.stderr.strip()}")
-
     def user_service_start(self):
         """Start systemd user service for this user."""
         service_name = f"user@{self.userid}.service"
@@ -560,27 +579,23 @@ class PAMHelper:
         """
         Check for orphan processes in user slice.
 
-        Orphans are processes in user-$UID.slice that are not under
-        user@$UID.service (e.g., leftover SSH sessions or other scopes).
+        Orphans are any processes left in user-$UID.slice when the user's
+        last job ends, including those under user@$UID.service (e.g.,
+        leftover SSH sessions, other scopes, or units started with
+        systemd-run --user), since that service may have failed to stop.
 
         Returns:
             List of orphan process descriptions, or empty list if none
         """
-        slice_path = f"/sys/fs/cgroup/user.slice/user-{self.userid}.slice"
-        service_path = f"{slice_path}/user@{self.userid}.service"
+        slice_path = f"{self.cgroup_root}/user.slice/user-{self.userid}.slice"
 
         # Check if slice exists
         if not os.path.exists(slice_path):
             return []
 
         orphans = []
-        # Walk the slice cgroup looking for non-service processes
+        # Walk the slice cgroup looking for processes
         for root, dirs, files in os.walk(slice_path):
-            # Skip the user@.service subtree: the path itself and what is
-            # below it, rather than every path its name is a prefix of.
-            if root == service_path or root.startswith(service_path + "/"):
-                continue
-
             # Check for processes in this cgroup
             procs_file = os.path.join(root, "cgroup.procs")
             if os.path.exists(procs_file):
@@ -693,10 +708,16 @@ class PAMHelper:
 
         Clear the active marker first so no new session is admitted,
         best-effort stop the user manager (it may have failed to start,
-        e.g. due to /proc mounted with hidepid=2), run the configured
-        orphan cleanup, then revert the constraint drop-ins. The empty
-        slice goes dead and is garbage-collected automatically; there is
-        no slice to stop.
+        e.g. due to /proc mounted with hidepid=2, or may take longer to
+        stop than systemctl is given), then run the configured orphan
+        cleanup. The empty slice goes dead and is garbage-collected
+        automatically; there is no slice to stop.
+
+        The slice constraints set with set-property --runtime are left in
+        place. They no longer affect processes once the slice is empty, and
+        the next prolog re-applies its own before it admits a new session.
+        Removing them would take systemctl revert, which reloads the whole
+        system manager.
         """
         self.clear_active_marker()
         service_name = f"user@{self.userid}.service"
@@ -704,19 +725,12 @@ class PAMHelper:
             run_subprocess([self.systemctl, "stop", service_name])
         except subprocess.CalledProcessError as e:
             self.debug_log(f"user manager stop non-fatal: {e.stderr.strip()}")
+        except subprocess.TimeoutExpired as e:
+            self.debug_log(f"user manager stop non-fatal: {e}")
 
-        cleanup_error = None
         if self.kill_user_slice:
             self.debug_log("kill-user-slice enabled, cleaning up slice")
-            try:
-                self._cleanup_user_slice()
-            except RuntimeError as e:
-                cleanup_error = e
-
-        self.revert_slice()
-
-        if cleanup_error:
-            raise cleanup_error
+            self._cleanup_user_slice()
 
 
 # vi: sw=4 ts=4 expandtab

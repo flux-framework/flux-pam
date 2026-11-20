@@ -324,6 +324,9 @@ Login denied with "no active jobs" while the user has a job
 "lock dir ... must not be group/other writable"
   Fix the permissions on the lock directory (see ``lock-dir``).
 
+"lock dir ... must be owned by root"
+  Change the owner of the lock directory to root (see ``lock-dir``).
+
 "StartTransientUnit(...) failed"
   The session module could not create the scope through systemd. Check
   the systemd journal for the reason.
