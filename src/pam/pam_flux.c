@@ -49,6 +49,7 @@
 #define PAM_SM_SESSION
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
+#include <security/pam_modutil.h>
 
 struct options {
     /*  If set, permit access to all users if the specified user has
@@ -301,7 +302,8 @@ static int check_socket_owner (pam_handle_t *pamh,
 }
 
 /* Return 1 if local instance at uri, owned by owner, has
- * access.allow-guest-user=true. Return 0 otherwise.
+ * access.allow-guest-user=true. Return 0 otherwise, or -1 if privileges
+ * could not be regained after the connect.
  */
 static int check_guest_allowed (pam_handle_t *pamh,
                                 const char *uri,
@@ -311,6 +313,12 @@ static int check_guest_allowed (pam_handle_t *pamh,
     struct pam_flux pf = { 0 };
     flux_future_t *f = NULL;
     char *local_uri = NULL;
+    struct passwd pwd;
+    struct passwd *pw = NULL;
+    char pwbuf[4096];
+    PAM_MODUTIL_DEF_PRIVS (privs);
+    bool dropped = false;
+    bool regain_error = false;
 
     if (!uri)
         goto out;
@@ -328,6 +336,19 @@ static int check_guest_allowed (pam_handle_t *pamh,
     }
     if (check_socket_owner (pamh, local_uri, owner) < 0)
         goto out;
+    /*  The socket path can be replaced between the check above and the
+     *  connect, e.g. with a symlink to a socket only root may connect to.
+     *  Talk to the instance with the job owner's filesystem credentials,
+     *  so that the connect succeeds only for a socket the job owner could
+     *  reach. Privileges are regained at out.
+     */
+    if (getpwuid_r (owner, &pwd, pwbuf, sizeof (pwbuf), &pw) != 0 || !pw) {
+        pam_syslog (pamh, LOG_ERR, "uid %u does not exist", owner);
+        goto out;
+    }
+    if (pam_modutil_drop_priv (pamh, &privs, pw) < 0)
+        goto out;
+    dropped = true;
     if (pam_flux_open (pamh, local_uri, LOG_ERR, &pf) < 0)
         goto out;
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
@@ -346,8 +367,13 @@ static int check_guest_allowed (pam_handle_t *pamh,
 out:
     flux_future_destroy (f);
     pam_flux_close (pamh, &pf);
+    /*  Fail closed if privileges cannot be regained: the caller may still
+     *  be running with the job owner's filesystem credentials.
+     */
+    if (dropped && pam_modutil_regain_priv (pamh, &privs) < 0)
+        regain_error = true;
     free (local_uri);
-    return allowed;
+    return regain_error ? -1 : allowed;
 }
 
 typedef enum {
@@ -401,6 +427,8 @@ static flux_auth_t check_jobs_array (pam_handle_t *pamh,
                 if (rank == idset_first (ranks))
                     allowed = check_guest_allowed (pamh, uri, job_uid);
                 idset_destroy (ranks);
+                if (allowed < 0)
+                    return FLUX_AUTH_ERROR;
                 if (allowed)
                     return FLUX_AUTH_GUEST;
             }
