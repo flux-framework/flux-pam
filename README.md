@@ -4,10 +4,10 @@
 
 PAM module for the [Flux](https://flux-framework.org) resource management
 framework. Restricts node access to users with active Flux jobs on the node.
-When systemd integration is enabled, manages the user's systemd instance
-lifecycle and maintains slice resource constraints as the union of all
-resources allocated to that user's active jobs, placing authorized login
-sessions within the constrained slice.
+When user slice management is enabled, prolog and housekeeping scripts
+maintain the user's systemd slice while the user has jobs on the node,
+optionally constraining it to the union of resources allocated to those
+jobs, and the PAM module places authorized login sessions in that slice.
 
 ## Overview
 
@@ -36,9 +36,9 @@ containment is set up. Slice-based containment works even when
 
 | Requirement | Notes |
 |---|---|
-| [Flux](https://github.com/flux-framework/flux-core) ≥ 0.64.0 | System instance required |
+| [Flux](https://github.com/flux-framework/flux-core) ≥ 0.85.0 | System instance required |
 | PAM development headers | `pam-devel` (RHEL/Fedora) or `libpam-dev` (Debian/Ubuntu) |
-| systemd ≥ 239 | Required for session management and slice features |
+| systemd ≥ 239 | Required for session management and slice features; ≥ 244 for resource constraints (`exec.sdexec-constrain-resources`) |
 | libsystemd development headers | `systemd-devel` or `libsystemd-dev` |
 | cgroup v2 (unified hierarchy) | Required for `pam.manage-user-slice`; device and resource constraints do not work on cgroup v1 |
 
@@ -56,9 +56,10 @@ make install
 The PAM module installs to `$libdir/security` (e.g. `/usr/lib64/security`).
 Use `--enable-securedir=DIR` to override.
 
-When systemd integration is enabled, `make install` creates a tmpfiles.d
-drop-in at `/usr/lib/tmpfiles.d/flux-pam.conf` that creates `/run/flux-pam`
-with correct permissions (mode `0700`, owned by root) at boot. If you
+`make install` installs a tmpfiles.d drop-in,
+`$prefix/lib/tmpfiles.d/flux-pam.conf` (e.g.
+`/usr/lib/tmpfiles.d/flux-pam.conf`), which creates `/run/flux-pam` with
+correct permissions (mode `0700`, owned by root) at boot. If you
 manually create this directory, ensure it has these exact permissions.
 
 ### Packages
@@ -215,6 +216,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-LGPL-3.0 — see [COPYING](COPYING).
+LGPL-3.0 — see [LICENSE](LICENSE).
 
 LLNL-CODE-764420
