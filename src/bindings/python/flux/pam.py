@@ -209,13 +209,12 @@ class PAMHelper:
 
         # Acquire lock for this user. Wait long enough to outlast the
         # longest hold by another script: last-job housekeeping runs up to
-        # four systemctl commands (stop, two kills, revert) and waits
-        # out the grace time twice. One more SUBPROCESS_TIMEOUT covers
-        # its Flux RPCs and polling overhead. The prolog holds the lock
-        # for less: three systemctl commands (linger check, set-property,
-        # user manager start) and its Flux RPCs. Extra slack is cheap,
-        # since a wait that is too short fails the prolog and drains the
-        # node.
+        # three systemctl commands (stop, two kills) and waits out the
+        # grace time twice. Two more SUBPROCESS_TIMEOUTs cover its Flux
+        # RPCs and polling overhead. The prolog holds the lock for less:
+        # three systemctl commands (linger check, set-property, user
+        # manager start) and its Flux RPCs. Extra slack is cheap, since
+        # a wait that is too short fails the prolog and drains the node.
         lock_timeout = 5 * SUBPROCESS_TIMEOUT + 2 * self.kill_grace_time
         self._lock_fd = acquire_lock(
             userid, timeout=lock_timeout, lock_dir=self._lock_dir
@@ -531,6 +530,17 @@ class PAMHelper:
 
         # Apply properties to slice. An empty set is still applied, so that
         # devices left by an earlier update are cleared.
+        #
+        # Properties are applied with set-property --runtime and are not
+        # reverted after the user's last job. This relies on the set of
+        # properties the mapper returns being stable between jobs: other
+        # than DeviceAllow and DevicePolicy, which modify_slice() resets on
+        # every update, a property the mapper no longer returns is not
+        # cleared. After a configuration change that drops one, reboot, or
+        # run "systemctl revert user-UID.slice" where the user has no
+        # running jobs. Tracking applied properties to reset them
+        # automatically was considered and rejected as not worth the added
+        # state.
         self.debug_log(
             f"{script_type}: applying {len(properties)} properties to slice"
         )
@@ -559,19 +569,6 @@ class PAMHelper:
             os.unlink(self._marker_path)
         except FileNotFoundError:
             pass
-
-    def revert_slice(self):
-        """Remove Flux-applied resource-control drop-ins from the user slice.
-
-        set-property --runtime stores a drop-in that persists until reboot or
-        revert. Revert on last-job teardown so this job's constraints do not
-        linger. Reverting a slice with no drop-ins is a no-op.
-        """
-        slice_name = f"user-{self.userid}.slice"
-        try:
-            run_subprocess([self.systemctl, "revert", slice_name])
-        except subprocess.CalledProcessError as e:
-            self.debug_log(f"slice revert non-fatal: {e.stderr.strip()}")
 
     def user_service_start(self):
         """Start systemd user service for this user."""
@@ -712,10 +709,15 @@ class PAMHelper:
         Clear the active marker first so no new session is admitted,
         best-effort stop the user manager (it may have failed to start,
         e.g. due to /proc mounted with hidepid=2, or may take longer to
-        stop than systemctl is given), run the configured orphan cleanup,
-        then revert the constraint drop-ins even if cleanup failed. The
-        empty slice goes dead and is garbage-collected automatically;
-        there is no slice to stop.
+        stop than systemctl is given), then run the configured orphan
+        cleanup. The empty slice goes dead and is garbage-collected
+        automatically; there is no slice to stop.
+
+        The slice constraints set with set-property --runtime are left in
+        place. They no longer affect processes once the slice is empty, and
+        the next prolog re-applies its own before it admits a new session.
+        Removing them would take systemctl revert, which reloads the whole
+        system manager.
         """
         self.clear_active_marker()
         service_name = f"user@{self.userid}.service"
@@ -726,12 +728,9 @@ class PAMHelper:
         except subprocess.TimeoutExpired as e:
             self.debug_log(f"user manager stop non-fatal: {e}")
 
-        try:
-            if self.kill_user_slice:
-                self.debug_log("kill-user-slice enabled, cleaning up slice")
-                self._cleanup_user_slice()
-        finally:
-            self.revert_slice()
+        if self.kill_user_slice:
+            self.debug_log("kill-user-slice enabled, cleaning up slice")
+            self._cleanup_user_slice()
 
 
 # vi: sw=4 ts=4 expandtab

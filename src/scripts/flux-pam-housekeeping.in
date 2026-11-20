@@ -65,7 +65,7 @@ def main():
             )
 
             # If no jobs remain (N→0), tear down: clear the marker, best-effort
-            # stop the manager, run configured cleanup, and revert constraints.
+            # stop the manager, and run configured cleanup.
             if count == 0:
                 helper.debug_log(
                     f"housekeeping: tearing down slice for uid={userid}"
