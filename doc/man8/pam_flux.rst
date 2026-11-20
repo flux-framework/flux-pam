@@ -216,7 +216,7 @@ Session
   The ``pam_flux.so`` session module returns ``PAM_IGNORE`` for
   ``systemd-user`` without creating a scope, so the rest of the session
   runs normally. For a login, it moves the login process into a new
-  scope, ``flux-pam-<pid>.scope`` (see Session Management).  Doing that
+  scope, ``flux-pam-<pid>.scope`` (see Session Management). Doing that
   for the user manager would move it out of ``user@$UID.service``, where
   systemd expects it.
 

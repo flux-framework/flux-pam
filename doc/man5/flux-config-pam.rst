@@ -113,10 +113,10 @@ IMP (``/etc/flux/imp/conf.d/``)::
 
 The prolog and housekeeping scripts require only :envvar:`FLUX_JOB_ID`
 and :envvar:`FLUX_JOB_USERID`, which the IMP passes through by default,
-so ``allowed-environment`` is not needed here.  Setting it to a glob such
+so ``allowed-environment`` is not needed here. Setting it to a glob such
 as ``FLUX_*`` is discouraged: every variable it matches is supplied by
 the unprivileged instance owner and placed in the environment of a
-command running as root.  See
+command running as root. See
 :security:man5:`flux-config-security-imp`.
 
 See :core:man5:`flux-config-job-manager` and the Flux Administrator's
