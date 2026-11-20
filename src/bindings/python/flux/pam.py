@@ -693,10 +693,11 @@ class PAMHelper:
 
         Clear the active marker first so no new session is admitted,
         best-effort stop the user manager (it may have failed to start,
-        e.g. due to /proc mounted with hidepid=2), run the configured
-        orphan cleanup, then revert the constraint drop-ins. The empty
-        slice goes dead and is garbage-collected automatically; there is
-        no slice to stop.
+        e.g. due to /proc mounted with hidepid=2, or may take longer to
+        stop than systemctl is given), run the configured orphan cleanup,
+        then revert the constraint drop-ins even if cleanup failed. The
+        empty slice goes dead and is garbage-collected automatically;
+        there is no slice to stop.
         """
         self.clear_active_marker()
         service_name = f"user@{self.userid}.service"
@@ -704,19 +705,15 @@ class PAMHelper:
             run_subprocess([self.systemctl, "stop", service_name])
         except subprocess.CalledProcessError as e:
             self.debug_log(f"user manager stop non-fatal: {e.stderr.strip()}")
+        except subprocess.TimeoutExpired as e:
+            self.debug_log(f"user manager stop non-fatal: {e}")
 
-        cleanup_error = None
-        if self.kill_user_slice:
-            self.debug_log("kill-user-slice enabled, cleaning up slice")
-            try:
+        try:
+            if self.kill_user_slice:
+                self.debug_log("kill-user-slice enabled, cleaning up slice")
                 self._cleanup_user_slice()
-            except RuntimeError as e:
-                cleanup_error = e
-
-        self.revert_slice()
-
-        if cleanup_error:
-            raise cleanup_error
+        finally:
+            self.revert_slice()
 
 
 # vi: sw=4 ts=4 expandtab
