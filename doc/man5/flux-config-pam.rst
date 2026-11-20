@@ -29,8 +29,8 @@ Two configuration keys select the mode:
 Access control only
    (``pam.manage-user-slice = false``, the default.) The account module
    admits only users with an active job on the node (see :man8:`pam_flux`).
-   The session module takes no action: it returns success without creating
-   a slice or scope, so login sessions run in the calling service's cgroup
+   The session module creates no slice or scope, so login sessions run in
+   the calling service's cgroup
    (for example, that of :linux:man8:`sshd`). The prolog and housekeeping
    scripts exit early, so slice teardown and orphan cleanup
    (``kill-user-slice``) do not apply. No systemd integration is required.
@@ -138,8 +138,8 @@ manage-user-slice
    (Default: ``false``).
 
    When this feature is disabled, prolog and housekeeping scripts exit
-   early without managing user slices or markers. This includes the
-   instance owner (who always skips management).
+   early without managing user slices or markers. The scripts always skip
+   the instance owner, whether or not this feature is enabled.
 
 kill-user-slice
    Boolean value that controls whether housekeeping actively terminates
@@ -183,9 +183,11 @@ debug
    Boolean value that enables verbose debug logging for the prolog and
    housekeeping scripts. When ``true``, each script logs its actions to
    stderr. The job manager logs this output on rank 0 at ``LOG_ERR``
-   level; view it with :core:man1:`flux-dmesg`. Equivalent to setting the
-   ``FLUX_PAM_SCRIPTS_DEBUG`` environment variable. See TROUBLESHOOTING
-   in :man8:`pam_flux`. (Default: ``false``).
+   level; view it with :core:man1:`flux-dmesg`. The scripts also honor the
+   ``FLUX_PAM_SCRIPTS_DEBUG`` environment variable, but the IMP passes it
+   only if ``allowed-environment`` permits it (see PREREQUISITES), so use
+   this key instead. See TROUBLESHOOTING in :man8:`pam_flux`.
+   (Default: ``false``).
 
 
 RESOURCE CONSTRAINTS
@@ -242,8 +244,9 @@ Prolog scripts run at job start and perform the following actions (when
 6. Best-effort start ``user@UID.service`` (see PROCFS WITH HIDEPID)
 7. Release the lock
 
-The slice itself is automatically realized by systemd when the first login
-session scope attaches.
+The slice itself is automatically realized by systemd when the first unit
+in it starts: ``user@UID.service``, or, if that fails to start, the first
+login session scope.
 
 Housekeeping Scripts
 --------------------
@@ -335,7 +338,8 @@ User Isolation
 When ``exec.sdexec-constrain-resources`` is enabled, systemd resource
 constraints ensure that:
 
-- Users can only access CPU cores allocated to their jobs
+- Users can only access CPU cores allocated to their jobs, and memory
+  on the NUMA nodes of those cores
 - Users can only access GPUs allocated to their jobs
 - Users cannot access physical devices not explicitly granted
 
