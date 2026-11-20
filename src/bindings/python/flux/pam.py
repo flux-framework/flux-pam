@@ -24,6 +24,9 @@ from flux.job import JobKVSLookup, JobList
 from flux.resource import ResourceSet
 from flux.util import parse_fsd
 
+# Maximum seconds run_subprocess() waits for a command
+SUBPROCESS_TIMEOUT = 30
+
 
 def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
     """
@@ -105,13 +108,13 @@ def release_lock(fd):
             os.close(fd)
 
 
-def run_subprocess(args, timeout=30):
+def run_subprocess(args, timeout=SUBPROCESS_TIMEOUT):
     """
     Run a subprocess with timeout, requiring absolute paths.
 
     Args:
         args: List of command arguments (first must be absolute path)
-        timeout: Maximum seconds to wait (default: 30)
+        timeout: Maximum seconds to wait (default: SUBPROCESS_TIMEOUT)
 
     Returns:
         subprocess.CompletedProcess result
@@ -201,8 +204,19 @@ class PAMHelper:
         self._lock_dir = os.environ.get("FLUX_PAM_LOCK_DIR", "/run/flux-pam")
         self._marker_path = f"{self._lock_dir}/uid.{userid}.active"
 
-        # Acquire lock for this user
-        self._lock_fd = acquire_lock(userid, lock_dir=self._lock_dir)
+        # Acquire lock for this user. Wait long enough to outlast the
+        # longest hold by another script: last-job housekeeping runs up to
+        # four systemctl commands (stop, two kills, revert) and waits
+        # out the grace time twice. One more SUBPROCESS_TIMEOUT covers
+        # its Flux RPCs and polling overhead. The prolog holds the lock
+        # for less: three systemctl commands (linger check, set-property,
+        # user manager start) and its Flux RPCs. Extra slack is cheap,
+        # since a wait that is too short fails the prolog and drains the
+        # node.
+        lock_timeout = 5 * SUBPROCESS_TIMEOUT + 2 * self.kill_grace_time
+        self._lock_fd = acquire_lock(
+            userid, timeout=lock_timeout, lock_dir=self._lock_dir
+        )
 
     def __enter__(self):
         """Context manager entry."""
