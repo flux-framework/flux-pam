@@ -1502,6 +1502,15 @@ class TestGraceTime(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.make_helper("-1s")
 
+    def test_lock_timeout_covers_grace_time(self):
+        """The lock wait grows with the grace time"""
+        for grace, seconds in (("30s", 30), ("5m", 300)):
+            mock_lock = self.make_helper(grace)
+            timeout = mock_lock.call_args[1]["timeout"]
+            self.assertEqual(
+                timeout, 5 * flux.pam.SUBPROCESS_TIMEOUT + 2 * seconds
+            )
+
 
 class TestSliceTeardown(unittest.TestCase):
     """Test last-job slice teardown"""
