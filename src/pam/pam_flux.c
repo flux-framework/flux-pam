@@ -33,6 +33,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <jansson.h>
@@ -731,6 +732,81 @@ static bool user_lock_is_held (pam_handle_t *pamh,
 
 #ifdef HAVE_LIBSYSTEMD
 
+/*  Timeout in seconds for systemd to run the scope start job.
+ */
+#define SCOPE_START_TIMEOUT 10
+
+/*  The start job of a scope, and its result once JobRemoved is received.
+ */
+struct start_job {
+    const char *path;
+    char result[32];
+};
+
+/*  JobRemoved signal handler. sd_bus_call() leaves signals queued until
+ *  sd_bus_process() dispatches them, so this runs only after the job path
+ *  has been read from the StartTransientUnit reply.
+ */
+static int job_removed_cb (sd_bus_message *m,
+                           void *arg,
+                           sd_bus_error *error)
+{
+    struct start_job *job = arg;
+    const char *path;
+    const char *result;
+
+    if (sd_bus_message_read (m, "uoss", NULL, &path, NULL, &result) >= 0
+        && strcmp (path, job->path) == 0)
+        snprintf (job->result, sizeof (job->result), "%s", result);
+    return 0;
+}
+
+/*  Process bus messages until the JobRemoved signal for job arrives.
+ *  Returns 0 if the job result is "done", -1 otherwise.
+ */
+static int wait_start_job (pam_handle_t *pamh,
+                           sd_bus *bus,
+                           const char *scope_name,
+                           struct start_job *job)
+{
+    struct timespec ts;
+    uint64_t now;
+    uint64_t deadline;
+    int r;
+
+    clock_gettime (CLOCK_MONOTONIC, &ts);
+    deadline = ts.tv_sec + SCOPE_START_TIMEOUT;
+    while (job->result[0] == '\0') {
+        if ((r = sd_bus_process (bus, NULL)) < 0) {
+            pam_syslog (pamh, LOG_ERR, "sd_bus_process: %s", strerror (-r));
+            return -1;
+        }
+        if (r > 0)
+            continue;
+        clock_gettime (CLOCK_MONOTONIC, &ts);
+        if ((now = ts.tv_sec) >= deadline) {
+            pam_syslog (pamh,
+                        LOG_ERR,
+                        "timed out waiting for scope %s to start",
+                        scope_name);
+            return -1;
+        }
+        if ((r = sd_bus_wait (bus, (deadline - now) * 1000000)) < 0) {
+            pam_syslog (pamh, LOG_ERR, "sd_bus_wait: %s", strerror (-r));
+            return -1;
+        }
+    }
+    if (strcmp (job->result, "done") != 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "scope %s failed to start: %s",
+                    scope_name,
+                    job->result);
+        return -1;
+    }
+    return 0;
+}
+
 /*  Create a transient scope under user-$UID.slice for the login session.
  *  Scope name: flux-pam-<pid>.scope
  *  PID alone is sufficient for uniqueness system-wide.
@@ -746,8 +822,11 @@ static int create_session_scope (pam_handle_t *pamh,
     sd_bus_error error = SD_BUS_ERROR_NULL;
     sd_bus_message *m = NULL;
     sd_bus_message *reply = NULL;
+    sd_bus_slot *slot = NULL;
+    struct start_job job = { 0 };
     char slice_name[64];
     int rc = -1;
+    int r;
 
     if (snprintf (slice_name,
                   sizeof (slice_name),
@@ -830,6 +909,26 @@ static int create_session_scope (pam_handle_t *pamh,
         goto out;
     }
 
+    /*  The reply means only that the start job is queued. systemd moves
+     *  pid into the scope when the job runs, and sends JobRemoved with the
+     *  job result to the caller that queued it. Add the match before the
+     *  call so the signal cannot be missed.
+     */
+    if ((r = sd_bus_match_signal (bus,
+                                  &slot,
+                                  "org.freedesktop.systemd1",
+                                  "/org/freedesktop/systemd1",
+                                  "org.freedesktop.systemd1.Manager",
+                                  "JobRemoved",
+                                  job_removed_cb,
+                                  &job)) < 0) {
+        pam_syslog (pamh,
+                    LOG_ERR,
+                    "failed to add JobRemoved match: %s",
+                    strerror (-r));
+        goto out;
+    }
+
     /*  Call the method.
      */
     if (sd_bus_call (bus, m, 0, &error, &reply) < 0) {
@@ -840,6 +939,12 @@ static int create_session_scope (pam_handle_t *pamh,
                     error.message ? error.message : "unknown error");
         goto out;
     }
+    if (sd_bus_message_read (reply, "o", &job.path) < 0) {
+        pam_syslog (pamh, LOG_ERR, "failed to read StartTransientUnit reply");
+        goto out;
+    }
+    if (wait_start_job (pamh, bus, scope_name, &job) < 0)
+        goto out;
 
     if (debug)
         pam_syslog (pamh,
@@ -850,6 +955,7 @@ static int create_session_scope (pam_handle_t *pamh,
     rc = 0;
 
 out:
+    sd_bus_slot_unref (slot);
     sd_bus_message_unref (reply);
     sd_bus_message_unref (m);
     sd_bus_error_free (&error);
