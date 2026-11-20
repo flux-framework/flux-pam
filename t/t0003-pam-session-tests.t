@@ -75,8 +75,10 @@ TEST_UID=$(id -u ${TEST_USER})
 # FAKE_USERID required for submit_as_guest()
 FAKE_USERID=${TEST_UID}
 
-# Use test trash directory for lock files (matches PAM stack lock-dir)
-export FLUX_PAM_LOCK_DIR=$(pwd)
+# The session module runs as root and requires a root-owned lock dir.
+# Create it outside the trash directory, which could not be removed by
+# the next run if this one left a populated root-owned dir in it.
+export FLUX_PAM_LOCK_DIR=$(sudo mktemp -d /tmp/flux-pam-t0003.XXXXXX)
 
 # Acquire lock for this user's systemd service
 test_systemd_user_lock ${TEST_UID}
@@ -115,7 +117,7 @@ test_expect_success 'create PAM stack' '
 	auth    required   pam_localuser.so
 	account sufficient pam_succeed_if.so uid < 500
 	account sufficient ${PAM_FLUX_PATH} uri=${FLUX_URI}
-	session requisite  ${PAM_FLUX_PATH} uri=${FLUX_URI} debug scope-prefix=flux-pam-test lock-dir=$(pwd)
+	session requisite  ${PAM_FLUX_PATH} uri=${FLUX_URI} debug scope-prefix=flux-pam-test lock-dir=${FLUX_PAM_LOCK_DIR}
 	session required   pam_unix.so
 	EOF
 '
@@ -143,7 +145,7 @@ test_expect_success 'slice-state: submit test job' '
 '
 test_expect_success 'slice-state: manually create marker (prolog not configured)' '
 	sudo touch ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active &&
-	test -f ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
+	sudo test -f ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
 test_expect_success 'slice-state: session attach succeeds with marker present' '
 	pamtest_session -u ${TEST_USER}
@@ -159,7 +161,6 @@ test_expect_success 'slice-state: cancel running job' '
 	flux job wait-event -vt 20 $jobid clean
 '
 test_expect_success 'scope-create: create marker for test' '
-	sudo mkdir -p ${FLUX_PAM_LOCK_DIR} &&
 	sudo touch ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
 '
 test_expect_success 'scope-create: clean up any scopes from previous tests' '
@@ -316,5 +317,8 @@ test_expect_success 'reset state of test user manager and marker' '
 		sudo systemctl stop user@${TEST_UID}.service
 	fi &&
 	sudo rm -f ${FLUX_PAM_LOCK_DIR}/uid.${TEST_UID}.active
+'
+test_expect_success 'remove root-owned lock directory' '
+	sudo rm -rf ${FLUX_PAM_LOCK_DIR}
 '
 test_done
