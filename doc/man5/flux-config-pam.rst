@@ -167,12 +167,14 @@ kill-user-slice
 kill-slice-grace-time
    Duration in Flux Standard Duration (FSD) format specifying how long to
    wait for processes to exit after each kill signal. Only applies when
-   ``kill-user-slice = true``. (Default: ``"30s"``).
+   ``kill-user-slice = true``. Must be finite. (Default: ``"30s"``).
 
    The grace time is applied twice: once after ``SIGTERM``, once after
-   ``SIGKILL``. Maximum total cleanup time is therefore
-   ``2 * kill-slice-grace-time``. If processes remain after both waits,
-   housekeeping drains the node.
+   ``SIGKILL``. Cleanup therefore waits at most ``2 *
+   kill-slice-grace-time``, plus up to 30 seconds for each ``systemctl``
+   command. If processes remain after both waits, housekeeping drains the
+   node. Prolog and housekeeping wait for the user lock for ``150s + 2 *
+   kill-slice-grace-time``, enough to outlast the longest teardown.
 
    See :doc:`rfc:spec_23` for the FSD format specification.
 
