@@ -244,6 +244,11 @@ static void pam_flux_close (pam_handle_t *pamh, struct pam_flux *pf)
     flux_env_restore (pamh, pf);
 }
 
+/*  Timeout in seconds for RPCs to Flux. A wedged broker module would
+ *  otherwise hang logins and user manager starts indefinitely.
+ */
+#define RPC_TIMEOUT 5.0
+
 static char *uri_to_local (const char *uri)
 {
     char *local_uri = NULL;
@@ -290,6 +295,7 @@ static int check_guest_allowed (pam_handle_t *pamh, const char *uri)
     if (pam_flux_open (pamh, local_uri, LOG_ERR, &pf) < 0)
         goto out;
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
+        || flux_future_wait_for (f, RPC_TIMEOUT) < 0
         || flux_rpc_get_unpack (f,
                                 "{s?{s?b}}",
                                 "access",
@@ -385,11 +391,6 @@ static uid_t attr_get_uid (flux_t *h, const char *name)
 }
 
 
-/*  Timeout in seconds for the job-list query. A wedged job-list module
- *  would otherwise hang logins and user manager starts indefinitely.
- */
-#define JOB_LIST_TIMEOUT 5.0
-
 /*  get jobs in RUN state on this node for user(s) of interest:
  */
 static flux_auth_t flux_check_user (pam_handle_t *pamh,
@@ -451,7 +452,7 @@ static flux_auth_t flux_check_user (pam_handle_t *pamh,
                          "ranks", rankstr,
                          "states", FLUX_JOB_STATE_RUN);
     if (!f
-        || flux_future_wait_for (f, JOB_LIST_TIMEOUT) < 0
+        || flux_future_wait_for (f, RPC_TIMEOUT) < 0
         || flux_rpc_get_unpack (f, "{s:o}", "jobs", &jobs) < 0) {
         pam_syslog (pamh, LOG_ERR, "flux_job_list: %m");
         goto out;
@@ -918,6 +919,7 @@ static int check_pam_manage_user_slice (pam_handle_t *pamh,
     /*  Fetch broker config via RPC (not cached handle config).
      */
     if (!(f = flux_rpc (pf.h, "config.get", NULL, FLUX_NODEID_ANY, 0))
+        || flux_future_wait_for (f, RPC_TIMEOUT) < 0
         || flux_rpc_get_unpack (f,
                                 "{s?:{s?:b}}",
                                 "pam",
