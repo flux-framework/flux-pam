@@ -233,6 +233,23 @@ test_expect_success 'pam_flux: access allowed if access.allow-guest-user=1' '
 	flux cancel $id &&
 	flux job wait-event -vt 15 $id clean
 '
+#  Rewrite the user.uri annotation of a guest-enabled instance to reach
+#  the same socket through "..", which valid_local_uri() rejects.
+test_expect_success 'pam_flux: access denied if instance uri contains ..' '
+	id=$(flux alloc --requires=rank:0 \
+             --conf=access.allow-guest-user=true --bg -N1) &&
+	uri=$(flux jobs -no "{user.uri}" $id) &&
+	dir=$(dirname ${uri#ssh://*/}) &&
+	flux job memo $id \
+		uri=ssh://localhost/${dir}/../$(basename ${dir})/local-0 &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 test_must_fail pamtest -u nobody >bad-guest-uri.out 2>&1) &&
+	test_debug "cat bad-guest-uri.out" &&
+	grep "invalid guest instance uri" bad-guest-uri.out &&
+	grep "Access denied: user nobody" bad-guest-uri.out &&
+	flux cancel $id &&
+	flux job wait-event -vt 15 $id clean
+'
 test_expect_success 'pam_flux: access denied if not rank 0 of job' '
 	id=$(flux alloc --conf=access.allow-guest-user=true --bg -N2) &&
 	test_must_fail pamtest_on_rank 1 -u nobody 2>allow-guest3.err &&
