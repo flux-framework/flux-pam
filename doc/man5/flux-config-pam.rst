@@ -147,9 +147,9 @@ kill-user-slice
 
    When set to ``true``, housekeeping implements aggressive cleanup:
 
-   - Checks for orphan processes (processes in ``user-UID.slice`` but not
-     under ``user@UID.service``, such as leftover SSH sessions or other
-     systemd scopes)
+   - Checks for orphan processes (any process left in ``user-UID.slice``
+     after ``user@UID.service`` is stopped, such as leftover SSH sessions,
+     other systemd scopes, or user units if the stop failed)
    - If orphans exist, sends ``SIGTERM`` to all processes in the slice
    - Waits for ``kill-slice-grace-time`` for processes to exit
    - If processes remain, sends ``SIGKILL`` to all processes in the slice
