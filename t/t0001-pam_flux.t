@@ -168,6 +168,24 @@ test_expect_success SUDO 'pam_flux: module denies user with no job when run as r
 	test_must_fail grep "Unable to connect" root-nojob.out &&
 	grep "Access denied: user ${USER}" root-nojob.out
 '
+#  Programs such as sudo change PAM_USER between account management and
+#  session open. The session module must not act for a user the account
+#  module did not admit.
+test_expect_success 'pam_flux: session skips user not admitted by account' '
+	cat <<-EOF >pam-test-session &&
+	auth    required   pam_localuser.so
+	account required   ${PAM_FLUX_PATH} uri=${FLUX_URI}
+	session requisite  ${PAM_FLUX_PATH} uri=${FLUX_URI} debug
+	session required   pam_permit.so
+	EOF
+	jobid=$(flux submit --wait-event=alloc sleep 300) &&
+	test_when_finished "flux cancel $jobid" &&
+	(export PAM_WRAPPER_DEBUGLEVEL=2 &&
+	 pamtest_service pam-test-session -u ${USER} -S -U nobody \
+		>session-user.out 2>&1) &&
+	test_debug "cat session-user.out" &&
+	grep "skipping session setup for uid=$(id -u nobody)" session-user.out
+'
 #  FLUX_LOCAL_CONNECTOR_RETRY_COUNT=bogus makes flux_open() of a local://
 #  URI fail, and FLUX_HANDLE_TRACE=1 traces messages to stderr, so a job
 #  user is admitted without a trace only if pam_flux removed them. The
