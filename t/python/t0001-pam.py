@@ -1478,6 +1478,51 @@ class TestKillUserSlice(unittest.TestCase):
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
 
+class TestSliceTeardown(unittest.TestCase):
+    """Test last-job slice teardown"""
+
+    def setUp(self):
+        self.lock_dir = tempfile.mkdtemp()
+        os.environ["FLUX_PAM_LOCK_DIR"] = self.lock_dir
+        patcher = patch("flux.Flux")
+        mock_flux = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_flux.return_value.conf_get.side_effect = (
+            lambda key, default: default
+        )
+        self.helper = flux.pam.PAMHelper(12345, flux.job.JobID(1))
+        self.helper.kill_user_slice = True
+
+    def tearDown(self):
+        self.helper.__exit__(None, None, None)
+        shutil.rmtree(self.lock_dir, ignore_errors=True)
+        del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_teardown_tolerates_stop_timeout(self):
+        """A user manager stop timeout does not skip cleanup or revert"""
+
+        def run(args):
+            if "stop" in args:
+                raise subprocess.TimeoutExpired(args, 30)
+
+        with patch("flux.pam.run_subprocess", side_effect=run) as mock_run:
+            with patch.object(self.helper, "_cleanup_user_slice") as cleanup:
+                self.helper.user_slice_teardown()
+                cleanup.assert_called_once()
+            self.assertIn("revert", mock_run.call_args[0][0])
+
+    def test_teardown_reverts_when_cleanup_raises(self):
+        """The slice is reverted even if cleanup raises, then error raised"""
+        error = subprocess.CalledProcessError(1, ["systemctl", "kill"])
+        with patch("flux.pam.run_subprocess") as mock_run:
+            with patch.object(
+                self.helper, "_cleanup_user_slice", side_effect=error
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.helper.user_slice_teardown()
+            self.assertIn("revert", mock_run.call_args[0][0])
+
+
 if __name__ == "__main__":
     if rerun_under_flux(__flux_size()):
         from pycotap import TAPTestRunner
