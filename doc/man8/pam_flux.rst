@@ -237,10 +237,12 @@ cgroup v2 Requirement
 ---------------------
 
 Session management (``pam.manage-user-slice``) requires the cgroup v2 unified
-hierarchy (systemd ≥ 239). Resource properties such as ``AllowedCPUs``,
-``DevicePolicy``, and ``DeviceAllow`` are applied to user slice units via
-``systemctl set-property --runtime``, which systemd only enforces on the
-unified hierarchy. cgroup v1 systems are not supported.
+hierarchy and systemd ≥ 239. Resource constraints
+(``exec.sdexec-constrain-resources``) require systemd ≥ 244, which added
+``AllowedCPUs`` and ``AllowedMemoryNodes``. Resource properties such as
+``AllowedCPUs``, ``DevicePolicy``, and ``DeviceAllow`` are applied to user
+slice units via ``systemctl set-property --runtime``, which systemd only
+enforces on the unified hierarchy. cgroup v1 systems are not supported.
 
 Logind Incompatibility
 -----------------------
