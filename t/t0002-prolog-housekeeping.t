@@ -545,6 +545,25 @@ test_expect_success 'lock-dir-symlink: undrain rank and restore lock dir' '
 	rm ${FLUX_PAM_LOCK_DIR} &&
 	mv ${FLUX_PAM_LOCK_DIR}.real ${FLUX_PAM_LOCK_DIR}
 '
+#  The scripts accept a lock dir owned by root or by the user running
+#  them, here the test user. Give it to a third user, which they must
+#  refuse.
+test_expect_success SUDO 'lock-dir-owner: give lock dir to another owner' '
+	sudo chown nobody ${FLUX_PAM_LOCK_DIR}
+'
+test_expect_success SUDO 'lock-dir-owner: prolog fails with lock dir of another owner' '
+	jobid=$(submit_as_guest 5m --requires="rank:0" sleep 300) &&
+	echo $jobid > jobid.owner &&
+	test_expect_code 1 flux job wait-event -t 10s $jobid start
+'
+test_expect_success SUDO 'lock-dir-owner: verify error message in logs' '
+	jobid=$(cat jobid.owner) &&
+	flux dmesg | grep "$jobid" | grep "must be owned by root"
+'
+test_expect_success SUDO 'lock-dir-owner: undrain rank and restore owner' '
+	flux resource undrain -u 0 &&
+	sudo chown $(id -u) ${FLUX_PAM_LOCK_DIR}
+'
 test_expect_success 'remove sdexec-mapper' '
 	flux module remove sdexec-mapper
 '
