@@ -76,7 +76,7 @@ def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
         raise
 
     # Try to acquire exclusive lock with timeout
-    start = time.time()
+    start = time.monotonic()
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -85,7 +85,7 @@ def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
             if e.errno != errno.EWOULDBLOCK:
                 os.close(fd)
                 raise
-            if time.time() - start >= timeout:
+            if time.monotonic() - start >= timeout:
                 os.close(fd)
                 raise OSError(
                     errno.ETIMEDOUT,
@@ -627,10 +627,10 @@ class PAMHelper:
         Returns:
             True if slice became empty, False if timeout expired
         """
-        start = time.time()
+        start = time.monotonic()
         interval = 0.01  # Start at 10ms
 
-        while time.time() - start < timeout:
+        while time.monotonic() - start < timeout:
             if not self.check_orphan_processes():
                 return True
             time.sleep(interval)
