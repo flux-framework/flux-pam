@@ -44,19 +44,33 @@ def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
         File descriptor of the lock file (caller should hold until done)
 
     Raises:
-        OSError: If lock cannot be acquired within timeout
+        OSError: If lock cannot be acquired within timeout, or lock_dir is
+            not a directory owned by root (or the caller) that is not group
+            or other writable
         ValueError: If lock path is a symlink
     """
     # Create lock directory if it doesn't exist
     os.makedirs(lock_dir, mode=0o700, exist_ok=True)
 
-    # Verify lock_dir is a directory, not a symlink, and is only writable
-    # by its owner. This matches check_lock_dir() in pam_flux.so, so the
-    # prolog and the session module accept the same lock directories.
+    # Verify lock_dir is a directory, not a symlink, owned by root, and is
+    # only writable by its owner, so that only root can create or remove
+    # lock and marker files in it. This matches check_lock_dir() and
+    # check_lock_dir_owner() in pam_flux.so, so the scripts and the module
+    # accept the same lock directories.
     st = os.lstat(lock_dir)
     if not stat.S_ISDIR(st.st_mode):
         raise OSError(
             errno.ENOTDIR, f"Lock directory {lock_dir} is not a directory"
+        )
+    # The scripts run as root, so this requires a root-owned directory.
+    # The caller's own uid is also accepted so the scripts can run
+    # unprivileged in tests: trusting a directory it owns gains a process
+    # nothing, since it could already write anything there.
+    if st.st_uid not in (0, os.geteuid()):
+        raise OSError(
+            errno.EPERM,
+            f"Lock directory {lock_dir} must be owned by root "
+            f"(owner uid={st.st_uid})",
         )
     if st.st_mode & 0o022:  # Check if group or other writable
         raise OSError(
