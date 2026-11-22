@@ -123,10 +123,10 @@ lock-dir=DIR
   Directory for per-user lock files and active markers, shared with the
   prolog and housekeeping scripts. Used by the session module and by the
   account module for ``systemd-user``. The directory must exist, be owned
-  by root, and have permissions ``0700`` (owner read/write/execute only).
-  If the directory has group or other write permissions, lock acquisition
-  will fail with an error. The directory is created with correct permissions
-  by the flux-pam tmpfiles.d drop-in at boot.
+  by root, and not be writable by group or other. Mode ``0700`` is
+  recommended. Otherwise lock acquisition fails with an error. The
+  directory is created with mode ``0700`` by the flux-pam tmpfiles.d
+  drop-in at boot.
   (Default: ``/run/flux-pam``).
 
 Common Options

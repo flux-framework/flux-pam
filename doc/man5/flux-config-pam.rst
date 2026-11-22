@@ -282,14 +282,16 @@ The active marker file is created and removed under this lock, and the PAM
 session module reads it under lock, making session admission linearizable with
 teardown.
 
-The lock directory (``/run/flux-pam`` by default) must have permissions
-``0700`` (owner read/write/execute only) and be owned by root. Lock files
+The lock directory (``/run/flux-pam`` by default) must be owned by root and
+must not be writable by group or other, so that only root can create or
+remove lock and marker files in it. Mode ``0700`` is recommended. Lock files
 within the directory are created with permissions ``0600`` (owner read/write
 only) and are never deleted (they persist to avoid recreating them on each
-operation). If the lock directory has group or other write permissions, both
-the prolog/housekeeping scripts and the PAM session module will refuse to
-proceed and log an error. The directory is created with correct permissions
-at boot by the flux-pam tmpfiles.d drop-in (``/usr/lib/tmpfiles.d/flux-pam.conf``).
+operation). If the lock directory is not owned by root, or has group or other
+write permissions, both the prolog/housekeeping scripts and the PAM session
+module will refuse to proceed and log an error. The directory is created with
+mode ``0700`` at boot by the flux-pam tmpfiles.d drop-in
+(``/usr/lib/tmpfiles.d/flux-pam.conf``).
 
 
 PROCFS WITH HIDEPID
