@@ -12,6 +12,7 @@
 
 import errno
 import fcntl
+import math
 import os
 import stat
 import subprocess
@@ -22,6 +23,9 @@ import flux
 from flux.job import JobKVSLookup, JobList
 from flux.resource import ResourceSet
 from flux.util import parse_fsd
+
+# Maximum seconds run_subprocess() waits for a command
+SUBPROCESS_TIMEOUT = 30
 
 
 def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
@@ -40,19 +44,33 @@ def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
         File descriptor of the lock file (caller should hold until done)
 
     Raises:
-        OSError: If lock cannot be acquired within timeout
+        OSError: If lock cannot be acquired within timeout, or lock_dir is
+            not a directory owned by root (or the caller) that is not group
+            or other writable
         ValueError: If lock path is a symlink
     """
     # Create lock directory if it doesn't exist
     os.makedirs(lock_dir, mode=0o700, exist_ok=True)
 
-    # Verify lock_dir is a directory, not a symlink, and is only writable
-    # by its owner. This matches check_lock_dir() in pam_flux.so, so the
-    # prolog and the session module accept the same lock directories.
+    # Verify lock_dir is a directory, not a symlink, owned by root, and is
+    # only writable by its owner, so that only root can create or remove
+    # lock and marker files in it. This matches check_lock_dir() and
+    # check_lock_dir_owner() in pam_flux.so, so the scripts and the module
+    # accept the same lock directories.
     st = os.lstat(lock_dir)
     if not stat.S_ISDIR(st.st_mode):
         raise OSError(
             errno.ENOTDIR, f"Lock directory {lock_dir} is not a directory"
+        )
+    # The scripts run as root, so this requires a root-owned directory.
+    # The caller's own uid is also accepted so the scripts can run
+    # unprivileged in tests: trusting a directory it owns gains a process
+    # nothing, since it could already write anything there.
+    if st.st_uid not in (0, os.geteuid()):
+        raise OSError(
+            errno.EPERM,
+            f"Lock directory {lock_dir} must be owned by root "
+            f"(owner uid={st.st_uid})",
         )
     if st.st_mode & 0o022:  # Check if group or other writable
         raise OSError(
@@ -72,7 +90,7 @@ def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
         raise
 
     # Try to acquire exclusive lock with timeout
-    start = time.time()
+    start = time.monotonic()
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -81,7 +99,7 @@ def acquire_lock(uid, timeout=60, lock_dir="/run/flux-pam"):
             if e.errno != errno.EWOULDBLOCK:
                 os.close(fd)
                 raise
-            if time.time() - start >= timeout:
+            if time.monotonic() - start >= timeout:
                 os.close(fd)
                 raise OSError(
                     errno.ETIMEDOUT,
@@ -104,13 +122,13 @@ def release_lock(fd):
             os.close(fd)
 
 
-def run_subprocess(args, timeout=30):
+def run_subprocess(args, timeout=SUBPROCESS_TIMEOUT):
     """
     Run a subprocess with timeout, requiring absolute paths.
 
     Args:
         args: List of command arguments (first must be absolute path)
-        timeout: Maximum seconds to wait (default: 30)
+        timeout: Maximum seconds to wait (default: SUBPROCESS_TIMEOUT)
 
     Returns:
         subprocess.CompletedProcess result
@@ -145,6 +163,9 @@ class PAMHelper:
     acquires/releases locks and maintains flux connection state.
     """
 
+    # Mount point of the cgroup v2 unified hierarchy
+    cgroup_root = "/sys/fs/cgroup"
+
     def __init__(
         self,
         userid,
@@ -163,6 +184,7 @@ class PAMHelper:
 
         Raises:
             OSError: If lock cannot be acquired
+            ValueError: If pam.kill-slice-grace-time is invalid or infinite
         """
         self.userid = userid
         self.jobid = jobid
@@ -188,16 +210,30 @@ class PAMHelper:
         self.kill_user_slice = self.handle.conf_get(
             "pam.kill-user-slice", False
         )
-        self.kill_grace_time = parse_fsd(
-            self.handle.conf_get("pam.kill-slice-grace-time", "30s")
-        )
+        grace = self.handle.conf_get("pam.kill-slice-grace-time", "30s")
+        self.kill_grace_time = parse_fsd(grace)
+        if not math.isfinite(self.kill_grace_time):
+            raise ValueError(
+                f"pam.kill-slice-grace-time must be finite: {grace!r}"
+            )
 
         # Set up lock directory and paths
         self._lock_dir = os.environ.get("FLUX_PAM_LOCK_DIR", "/run/flux-pam")
         self._marker_path = f"{self._lock_dir}/uid.{userid}.active"
 
-        # Acquire lock for this user
-        self._lock_fd = acquire_lock(userid, lock_dir=self._lock_dir)
+        # Acquire lock for this user. Wait long enough to outlast the
+        # longest hold by another script: last-job housekeeping runs up to
+        # four systemctl commands (stop, two kills, revert) and waits
+        # out the grace time twice. One more SUBPROCESS_TIMEOUT covers
+        # its Flux RPCs and polling overhead. The prolog holds the lock
+        # for less: three systemctl commands (linger check, set-property,
+        # user manager start) and its Flux RPCs. Extra slack is cheap,
+        # since a wait that is too short fails the prolog and drains the
+        # node.
+        lock_timeout = 5 * SUBPROCESS_TIMEOUT + 2 * self.kill_grace_time
+        self._lock_fd = acquire_lock(
+            userid, timeout=lock_timeout, lock_dir=self._lock_dir
+        )
 
     def __enter__(self):
         """Context manager entry."""
@@ -560,27 +596,23 @@ class PAMHelper:
         """
         Check for orphan processes in user slice.
 
-        Orphans are processes in user-$UID.slice that are not under
-        user@$UID.service (e.g., leftover SSH sessions or other scopes).
+        Orphans are any processes left in user-$UID.slice when the user's
+        last job ends, including those under user@$UID.service (e.g.,
+        leftover SSH sessions, other scopes, or units started with
+        systemd-run --user), since that service may have failed to stop.
 
         Returns:
             List of orphan process descriptions, or empty list if none
         """
-        slice_path = f"/sys/fs/cgroup/user.slice/user-{self.userid}.slice"
-        service_path = f"{slice_path}/user@{self.userid}.service"
+        slice_path = f"{self.cgroup_root}/user.slice/user-{self.userid}.slice"
 
         # Check if slice exists
         if not os.path.exists(slice_path):
             return []
 
         orphans = []
-        # Walk the slice cgroup looking for non-service processes
+        # Walk the slice cgroup looking for processes
         for root, dirs, files in os.walk(slice_path):
-            # Skip the user@.service subtree: the path itself and what is
-            # below it, rather than every path its name is a prefix of.
-            if root == service_path or root.startswith(service_path + "/"):
-                continue
-
             # Check for processes in this cgroup
             procs_file = os.path.join(root, "cgroup.procs")
             if os.path.exists(procs_file):
@@ -609,10 +641,10 @@ class PAMHelper:
         Returns:
             True if slice became empty, False if timeout expired
         """
-        start = time.time()
+        start = time.monotonic()
         interval = 0.01  # Start at 10ms
 
-        while time.time() - start < timeout:
+        while time.monotonic() - start < timeout:
             if not self.check_orphan_processes():
                 return True
             time.sleep(interval)
@@ -693,10 +725,11 @@ class PAMHelper:
 
         Clear the active marker first so no new session is admitted,
         best-effort stop the user manager (it may have failed to start,
-        e.g. due to /proc mounted with hidepid=2), run the configured
-        orphan cleanup, then revert the constraint drop-ins. The empty
-        slice goes dead and is garbage-collected automatically; there is
-        no slice to stop.
+        e.g. due to /proc mounted with hidepid=2, or may take longer to
+        stop than systemctl is given), run the configured orphan cleanup,
+        then revert the constraint drop-ins even if cleanup failed. The
+        empty slice goes dead and is garbage-collected automatically;
+        there is no slice to stop.
         """
         self.clear_active_marker()
         service_name = f"user@{self.userid}.service"
@@ -704,19 +737,15 @@ class PAMHelper:
             run_subprocess([self.systemctl, "stop", service_name])
         except subprocess.CalledProcessError as e:
             self.debug_log(f"user manager stop non-fatal: {e.stderr.strip()}")
+        except subprocess.TimeoutExpired as e:
+            self.debug_log(f"user manager stop non-fatal: {e}")
 
-        cleanup_error = None
-        if self.kill_user_slice:
-            self.debug_log("kill-user-slice enabled, cleaning up slice")
-            try:
+        try:
+            if self.kill_user_slice:
+                self.debug_log("kill-user-slice enabled, cleaning up slice")
                 self._cleanup_user_slice()
-            except RuntimeError as e:
-                cleanup_error = e
-
-        self.revert_slice()
-
-        if cleanup_error:
-            raise cleanup_error
+        finally:
+            self.revert_slice()
 
 
 # vi: sw=4 ts=4 expandtab

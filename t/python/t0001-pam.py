@@ -1478,6 +1478,104 @@ class TestKillUserSlice(unittest.TestCase):
             del os.environ["FLUX_PAM_LOCK_DIR"]
 
 
+class TestGraceTime(unittest.TestCase):
+    """Test pam.kill-slice-grace-time handling"""
+
+    def make_helper(self, grace):
+        config = {"pam.kill-slice-grace-time": grace}
+        with patch("flux.Flux") as mock_flux:
+            mock_flux.return_value.conf_get.side_effect = (
+                lambda key, default: config.get(key, default)
+            )
+            with patch("flux.pam.acquire_lock") as mock_lock:
+                flux.pam.PAMHelper(12345, flux.job.JobID(1))
+                return mock_lock
+
+    def test_infinite_grace_time_rejected(self):
+        """An infinite grace time fails rather than hang cleanup"""
+        for grace in ("inf", "infinity"):
+            with self.assertRaisesRegex(ValueError, "must be finite"):
+                self.make_helper(grace)
+
+    def test_negative_grace_time_rejected(self):
+        """A negative grace time fails"""
+        with self.assertRaises(ValueError):
+            self.make_helper("-1s")
+
+    def test_lock_timeout_covers_grace_time(self):
+        """The lock wait grows with the grace time"""
+        for grace, seconds in (("30s", 30), ("5m", 300)):
+            mock_lock = self.make_helper(grace)
+            timeout = mock_lock.call_args[1]["timeout"]
+            self.assertEqual(
+                timeout, 5 * flux.pam.SUBPROCESS_TIMEOUT + 2 * seconds
+            )
+
+
+class TestSliceTeardown(unittest.TestCase):
+    """Test last-job slice teardown"""
+
+    def setUp(self):
+        self.lock_dir = tempfile.mkdtemp()
+        os.environ["FLUX_PAM_LOCK_DIR"] = self.lock_dir
+        patcher = patch("flux.Flux")
+        mock_flux = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_flux.return_value.conf_get.side_effect = (
+            lambda key, default: default
+        )
+        self.helper = flux.pam.PAMHelper(12345, flux.job.JobID(1))
+        self.helper.kill_user_slice = True
+
+    def tearDown(self):
+        self.helper.__exit__(None, None, None)
+        shutil.rmtree(self.lock_dir, ignore_errors=True)
+        del os.environ["FLUX_PAM_LOCK_DIR"]
+
+    def test_teardown_tolerates_stop_timeout(self):
+        """A user manager stop timeout does not skip cleanup or revert"""
+
+        def run(args):
+            if "stop" in args:
+                raise subprocess.TimeoutExpired(args, 30)
+
+        with patch("flux.pam.run_subprocess", side_effect=run) as mock_run:
+            with patch.object(self.helper, "_cleanup_user_slice") as cleanup:
+                self.helper.user_slice_teardown()
+                cleanup.assert_called_once()
+            self.assertIn("revert", mock_run.call_args[0][0])
+
+    def test_teardown_reverts_when_cleanup_raises(self):
+        """The slice is reverted even if cleanup raises, then error raised"""
+        error = subprocess.CalledProcessError(1, ["systemctl", "kill"])
+        with patch("flux.pam.run_subprocess") as mock_run:
+            with patch.object(
+                self.helper, "_cleanup_user_slice", side_effect=error
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.helper.user_slice_teardown()
+            self.assertIn("revert", mock_run.call_args[0][0])
+
+    def test_orphans_include_user_manager(self):
+        """Processes under user@UID.service are counted as orphans"""
+        root = os.path.join(self.lock_dir, "cgroup")
+        tree = os.path.join(root, "user.slice", "user-12345.slice")
+        for cgroup, pids in (
+            ("session-1.scope", "100\n"),
+            ("user@12345.service/app.slice/run-1.service", "200\n"),
+            ("user@12345.service/init.scope", ""),
+        ):
+            os.makedirs(os.path.join(tree, cgroup))
+            with open(os.path.join(tree, cgroup, "cgroup.procs"), "w") as f:
+                f.write(pids)
+
+        self.helper.cgroup_root = root
+        orphans = self.helper.check_orphan_processes()
+
+        self.assertEqual(len(orphans), 2)
+        self.assertTrue(any("run-1.service" in o for o in orphans))
+
+
 if __name__ == "__main__":
     if rerun_under_flux(__flux_size()):
         from pycotap import TAPTestRunner

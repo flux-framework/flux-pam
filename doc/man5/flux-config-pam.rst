@@ -147,9 +147,9 @@ kill-user-slice
 
    When set to ``true``, housekeeping implements aggressive cleanup:
 
-   - Checks for orphan processes (processes in ``user-UID.slice`` but not
-     under ``user@UID.service``, such as leftover SSH sessions or other
-     systemd scopes)
+   - Checks for orphan processes (any process left in ``user-UID.slice``
+     after ``user@UID.service`` is stopped, such as leftover SSH sessions,
+     other systemd scopes, or user units if the stop failed)
    - If orphans exist, sends ``SIGTERM`` to all processes in the slice
    - Waits for ``kill-slice-grace-time`` for processes to exit
    - If processes remain, sends ``SIGKILL`` to all processes in the slice
@@ -167,12 +167,14 @@ kill-user-slice
 kill-slice-grace-time
    Duration in Flux Standard Duration (FSD) format specifying how long to
    wait for processes to exit after each kill signal. Only applies when
-   ``kill-user-slice = true``. (Default: ``"30s"``).
+   ``kill-user-slice = true``. Must be finite. (Default: ``"30s"``).
 
    The grace time is applied twice: once after ``SIGTERM``, once after
-   ``SIGKILL``. Maximum total cleanup time is therefore
-   ``2 * kill-slice-grace-time``. If processes remain after both waits,
-   housekeeping drains the node.
+   ``SIGKILL``. Cleanup therefore waits at most ``2 *
+   kill-slice-grace-time``, plus up to 30 seconds for each ``systemctl``
+   command. If processes remain after both waits, housekeeping drains the
+   node. Prolog and housekeeping wait for the user lock for ``150s + 2 *
+   kill-slice-grace-time``, enough to outlast the longest teardown.
 
    See :doc:`rfc:spec_23` for the FSD format specification.
 
@@ -280,14 +282,16 @@ The active marker file is created and removed under this lock, and the PAM
 session module reads it under lock, making session admission linearizable with
 teardown.
 
-The lock directory (``/run/flux-pam`` by default) must have permissions
-``0700`` (owner read/write/execute only) and be owned by root. Lock files
+The lock directory (``/run/flux-pam`` by default) must be owned by root and
+must not be writable by group or other, so that only root can create or
+remove lock and marker files in it. Mode ``0700`` is recommended. Lock files
 within the directory are created with permissions ``0600`` (owner read/write
 only) and are never deleted (they persist to avoid recreating them on each
-operation). If the lock directory has group or other write permissions, both
-the prolog/housekeeping scripts and the PAM session module will refuse to
-proceed and log an error. The directory is created with correct permissions
-at boot by the flux-pam tmpfiles.d drop-in (``/usr/lib/tmpfiles.d/flux-pam.conf``).
+operation). If the lock directory is not owned by root, or has group or other
+write permissions, both the prolog/housekeeping scripts and the PAM session
+module will refuse to proceed and log an error. The directory is created with
+mode ``0700`` at boot by the flux-pam tmpfiles.d drop-in
+(``/usr/lib/tmpfiles.d/flux-pam.conf``).
 
 
 PROCFS WITH HIDEPID

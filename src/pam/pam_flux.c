@@ -1044,7 +1044,8 @@ static int user_lock_acquire (pam_handle_t *pamh,
     char path[PATH_MAX];
     int fd;
 
-    if (check_lock_dir (pamh, lock_dir) < 0)
+    if (check_lock_dir (pamh, lock_dir) < 0
+        || check_lock_dir_owner (pamh, lock_dir) < 0)
         return -1;
 
     if (snprintf (path, sizeof (path), "%s/uid.%u.lock", lock_dir, uid)
