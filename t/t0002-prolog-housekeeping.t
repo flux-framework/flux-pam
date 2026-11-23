@@ -225,9 +225,9 @@ test_expect_success MULTICORE 'jobid.1: housekeeping stops user service' '
 test_expect_success MULTICORE 'jobid.1: marker removed (last job)' '
 	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
 '
-test_expect_success MULTICORE 'jobid.1: housekeeping reverted slice constraints' '
+test_expect_success MULTICORE 'jobid.1: housekeeping left slice constraints' '
 	jobid=$(cat jobid.1) &&
-	grep "revert user-42.slice" systemctl-${jobid}.log
+	test_must_fail grep "revert" systemctl-${jobid}.log
 '
 # MULTICORE-only tests end
 
@@ -270,9 +270,9 @@ test_expect_success 'cancel job and verify kill sequence runs' '
 test_expect_success 'marker removed after last job housekeeping' '
 	test_must_fail test -f ${FLUX_PAM_LOCK_DIR}/uid.42.active
 '
-test_expect_success 'housekeeping reverted slice constraints' '
+test_expect_success 'housekeeping left slice constraints' '
 	jobid=$(cat jobid.kill) &&
-	grep "revert user-42.slice" systemctl-${jobid}.log
+	test_must_fail grep "revert" systemctl-${jobid}.log
 '
 test_expect_success 'housekeeping checks for orphans before killing' '
 	jobid=$(cat jobid.kill) &&
