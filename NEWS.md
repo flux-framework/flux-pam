@@ -1,3 +1,21 @@
+flux-pam version 0.6.0 - 2026-11-22
+-----------------------------------
+
+ * update and correct docs and README (#48)
+ * don't revert user slice after the user's last job (#47)
+ * fix user slice teardown and lock handling issues in prolog and housekeeping
+   (#46)
+ * pam: skip sessions for a `PAM_USER` the account module did not admit (#45)
+ * pam: wait for session scope to start and harden guest checks (#44)
+ * pam: ignore `FLUX_*` environment variables and add `uri=` option (#43)
+ * pam: fix Flux future leak with allow-guest-user (#42)
+ * pam: admit job users for `systemd-user` (#41)
+ * ci: add dependabot and update github actions, vermin, and mypy versions
+   (#40)
+ * doc: explain PAM control fields, fix account stack examples, add
+   troubleshooting guide (#39)
+ * doc: drop allowed-environment from IMP configuration examples (#38)
+
 flux-pam version 0.5.0 - 2026-10-03
 -----------------------------------
 
