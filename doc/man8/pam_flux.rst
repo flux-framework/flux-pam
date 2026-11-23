@@ -220,7 +220,7 @@ Session
   The ``pam_flux.so`` session module returns ``PAM_IGNORE`` for
   ``systemd-user`` without creating a scope, so the rest of the session
   runs normally. For a login, it moves the login process into a new
-  scope, ``flux-pam-<pid>.scope`` (see Session Management).  Doing that
+  scope, ``flux-pam-<pid>.scope`` (see Session Management). Doing that
   for the user manager would move it out of ``user@$UID.service``, where
   systemd expects it.
 
@@ -237,10 +237,12 @@ cgroup v2 Requirement
 ---------------------
 
 Session management (``pam.manage-user-slice``) requires the cgroup v2 unified
-hierarchy (systemd ≥ 239). Resource properties such as ``AllowedCPUs``,
-``DevicePolicy``, and ``DeviceAllow`` are applied to user slice units via
-``systemctl set-property --runtime``, which systemd only enforces on the
-unified hierarchy. cgroup v1 systems are not supported.
+hierarchy and systemd ≥ 239. Resource constraints
+(``exec.sdexec-constrain-resources``) require systemd ≥ 244, which added
+``AllowedCPUs`` and ``AllowedMemoryNodes``. Resource properties such as
+``AllowedCPUs``, ``DevicePolicy``, and ``DeviceAllow`` are applied to user
+slice units via ``systemctl set-property --runtime``, which systemd only
+enforces on the unified hierarchy. cgroup v1 systems are not supported.
 
 Logind Incompatibility
 -----------------------
